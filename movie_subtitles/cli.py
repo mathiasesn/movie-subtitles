@@ -36,6 +36,8 @@ def create_subtitles(
         segment_id = segment.id + 1
 
         text = translator(text, srt_lang)
+        if not text:
+            continue
 
         segment = f"{segment_id}\n{start_time} --> {end_time}\n{text[1:] if text[0] == ' ' else text}\n\n"
         srt_lines.append(segment)

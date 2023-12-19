@@ -26,4 +26,4 @@ class Translate:
         outputs = self.model.generate(input_ids=input_ids)
         text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-        return text[1:] if text[0] == " " else text
+        return text
