@@ -13,7 +13,8 @@ logger = logging.getLogger("elevenlabs")
 
 _SENTENCE_END_CHARS = (".", "!", "?", "…")
 
-# ElevenLabs' documented voice_settings.speed range; see Speak's docstring.
+# ElevenLabs' documented voice_settings.speed range; `speak()` clamps to this range,
+# see Speak's docstring.
 _MIN_SPEED = 0.7
 _MAX_SPEED = 1.2
 
@@ -133,7 +134,8 @@ class Speak:
     https://elevenlabs.io/docs/best-practices/prompting/controls.md the documented
     valid range is 0.7 (slowest) to 1.2 (fastest), default 1.0, with a warning that
     extreme values can degrade audio quality. The dub.py clamp is intentionally
-    tighter than what the API allows.
+    tighter than what the API allows; `speak()` itself clamps to the API's own
+    0.7-1.2 range as a defensive floor/ceiling on whatever rate it is handed.
     """
 
     def __init__(

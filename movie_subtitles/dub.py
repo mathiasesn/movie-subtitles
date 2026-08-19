@@ -64,15 +64,14 @@ def _synthesise_fitted(
     tts(text, clip_path, speed=1.0)
     duration = _probe_duration(clip_path)
 
-    if duration == slot_duration:
-        return clip_path, False
-
     rate = fit_rate(duration, slot_duration)
     ideal_rate = duration / slot_duration if slot_duration > 0 else 1.0
     if rate != ideal_rate:
+        direction = "speed up" if ideal_rate > 1.0 else "slow down"
         logger.warning(
-            f"Segment {segment_id} needs rate {ideal_rate:.2f}x to fit its slot, clamped "
-            f"to {rate:.2f}x ({duration:.2f}s audio vs {slot_duration:.2f}s slot)."
+            f"Segment {segment_id} would need to {direction} to rate {ideal_rate:.2f}x to "
+            f"exactly fit its slot, clamped to {rate:.2f}x ({duration:.2f}s audio vs "
+            f"{slot_duration:.2f}s slot)."
         )
     if round(rate, 2) != 1.0:
         if rate > 1.0:
