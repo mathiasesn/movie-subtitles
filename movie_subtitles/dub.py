@@ -64,11 +64,13 @@ def _synthesise_fitted(
 ) -> tuple[Path, bool]:
     """Synthesise `text`, re-synthesising at an adjusted rate if it over- or underruns.
 
-    Returns (clip_path, still_overruns). For the ordinary case, `still_overruns` is True
-    if the segment's actual, re-measured duration still overruns the slot after the
-    clamped-rate re-synthesis (not merely whether the ideal rate fell outside the clamp --
-    the clamped rate is an approximation and re-synthesis can still land long of the
-    slot). An underrun never counts here: it just leaves trailing silence in the slot.
+    Returns (clip_path, still_overruns). For the ordinary case, `still_overruns` is True if
+    the segment's actual duration still overruns the slot once fitting is done: fitting
+    re-synthesises at a clamped rate only when the ideal rate rounds away from 1.00, so
+    `still_overruns` is measured on that re-synthesised clip when a retry happened, or on
+    the original 1.0x clip when it did not (an ideal rate close enough to round to 1.00 can
+    still leave the clip longer than the slot). An underrun never counts here: it just
+    leaves trailing silence in the slot.
 
     Two cases skip that re-synthesis and re-measurement entirely, returning True without
     ever attempting a clamped-rate fit: a non-positive slot duration, and an ideal rate

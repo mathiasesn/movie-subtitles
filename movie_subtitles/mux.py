@@ -15,7 +15,10 @@ def mux_dub(video_path: Path, audio_path: Path) -> Path:
     original video's audio track is dropped; the synthesised track replaces it. The
     video's full duration is authoritative -- no `-shortest`, so a synthesised track that
     ends before the video does (e.g. no speech in the video's tail) does not truncate the
-    video; ffmpeg pads the shorter audio stream with silence to the video's length.
+    video; without `-shortest` or `apad`, ffmpeg does not pad the audio at all -- the
+    audio stream simply ends early and playback continues on video alone for the
+    remainder (verified with synthetic media: a 10s video + 3s audio track muxes to a
+    10s output).
 
     The output keeps the source container, so the audio codec has to be one that container
     accepts -- see `audio_codec_for`. The video track is always stream-copied, so the
