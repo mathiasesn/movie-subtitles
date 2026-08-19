@@ -147,15 +147,15 @@ def create_subtitles(
     srt_lines = []
     dub_segments: list[Segment] = []
     dub_translations: dict[int, str] = {}
+    cue_id = 0
     for segment in tqdm(segments, desc="Writing to srt file"):
-        segment_id = segment.id + 1
-
         budget_chars = _budget_chars(segment.start, segment.end)
         text = translator(segment.text, srt_lang, budget_chars=budget_chars)
         if not text:
             continue
 
-        srt_lines.append(format_block(segment_id, segment.start, segment.end, text))
+        cue_id += 1
+        srt_lines.append(format_block(cue_id, segment.start, segment.end, text))
 
         if dub:
             dub_segments.append(segment)
