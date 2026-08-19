@@ -11,6 +11,16 @@ dependencies = [
     "faster-whisper",
     "transformers",
     "torch",
+    # providers/local.py passes device_map= to from_pretrained, which transformers
+    # only accepts when accelerate is installed. --engine local cannot translate
+    # without it.
+    "accelerate",
+    "elevenlabs",
+    "anthropic",
+    "openai",
+    # main() loads .env before building any provider, so the API keys can live in a
+    # gitignored file instead of being exported into every shell.
+    "python-dotenv",
 ]
 
 [project.urls]
