@@ -10,6 +10,7 @@ dependencies = [
     "tqdm",
     "faster-whisper",
     "transformers",
+    "torch",
 ]
 
 [project.urls]
