@@ -1,0 +1,66 @@
+name: Bug report
+description: Report something that does not work as expected
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact command you ran, plus anything needed to reproduce it.
+      placeholder: |
+        uv run movie-subtitles input.mp4 --engine local --target-lang da
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / traceback
+      description: Relevant log output. Redact API keys.
+      render: shell
+    validations:
+      required: false
+  - type: dropdown
+    id: asr-engine
+    attributes:
+      label: ASR engine
+      options: ["local", "elevenlabs", "openai", "not applicable"]
+    validations:
+      required: true
+  - type: dropdown
+    id: translation-engine
+    attributes:
+      label: Translation engine
+      options: ["local", "anthropic", "openai", "not applicable"]
+    validations:
+      required: true
+  - type: dropdown
+    id: tts-engine
+    attributes:
+      label: TTS engine
+      options: ["elevenlabs", "openai", "not applicable"]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: movie-subtitles version
+      placeholder: "0.1.1"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python version, ffmpeg version.
+      placeholder: "Ubuntu 24.04, Python 3.12, ffmpeg 6.1"
+    validations:
+      required: true
