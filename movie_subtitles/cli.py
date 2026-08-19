@@ -43,9 +43,20 @@ def create_subtitles(
     mt_model_name: str = "jbochi/madlad400-3b-mt",
     engine: str = "local",
     dub: bool = False,
+    managed: bool = False,
 ) -> None:
     if isinstance(fpath, str):
         fpath = Path(fpath)
+
+    if managed and dub:
+        raise ValueError(
+            "--managed and --dub are mutually exclusive: --managed runs the ElevenLabs "
+            "Dubbing job end to end instead of the local transcribe/translate/dub pipeline."
+        )
+
+    if managed:
+        _run_managed(fpath, audio_lang, srt_lang)
+        return
 
     srt_file = fpath.with_suffix(".srt")
 
@@ -74,6 +85,14 @@ def create_subtitles(
 
     if dub:
         _dub_and_mux(fpath, dub_segments, dub_translations)
+
+
+def _run_managed(fpath: Path, audio_lang: str, srt_lang: str) -> None:
+    from movie_subtitles.dubbing import ManagedDub
+
+    managed_dub = ManagedDub()
+    out_path = managed_dub(fpath, audio_lang, srt_lang)
+    logger.info(f"Saved managed dub to {out_path}")
 
 
 def _dub_and_mux(
@@ -144,6 +163,15 @@ def main() -> None:
             "the source video (requires ffmpeg and ELEVENLABS_API_KEY)"
         ),
     )
+    parser.add_argument(
+        "--managed",
+        action="store_true",
+        help=(
+            "Use the managed ElevenLabs Dubbing job (create/poll/download) instead of "
+            "the local transcribe/translate/dub pipeline (requires ELEVENLABS_API_KEY). "
+            "Mutually exclusive with --dub."
+        ),
+    )
     args = parser.parse_args()
 
     create_subtitles(
@@ -154,6 +182,7 @@ def main() -> None:
         args.mt_model,
         engine=args.engine,
         dub=args.dub,
+        managed=args.managed,
     )
 
 
