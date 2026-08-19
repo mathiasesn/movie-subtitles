@@ -1,7 +1,6 @@
 import logging
 import os
 from collections.abc import Iterable
-from functools import lru_cache
 from pathlib import Path
 
 from openai import OpenAI
@@ -15,13 +14,8 @@ _MIN_SPEED = 0.25
 _MAX_SPEED = 4.0
 
 
-@lru_cache(maxsize=1)
 def build_client() -> OpenAI:
-    """Build the OpenAI client, memoised.
-
-    --engine openai --dub constructs three providers (ASR, translation, TTS); sharing
-    one client keeps them on a single connection pool instead of three.
-    """
+    """Build a fresh OpenAI client, one per provider instance."""
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError(
@@ -35,12 +29,13 @@ def build_client() -> OpenAI:
 class OpenAITranscribe:
     """ASRProvider backed by the OpenAI audio transcriptions endpoint.
 
-    Default model is "whisper-1" -- the documented, reliable model for
-    verbose_json responses with segment-level timestamps, which this provider
-    requires. "gpt-4o-transcribe" is newer, but its support for
-    response_format="verbose_json" / timestamp_granularities=["segment"] is not
-    guaranteed across accounts, so it is not the default; the model remains an
-    __init__ param the caller can override.
+    Default model is "whisper-1" -- the only OpenAI transcription model that
+    supports response_format="verbose_json" with segment-level timestamps.
+    "gpt-4o-transcribe" does not support verbose_json or segment/word timestamps
+    at all, and this pipeline is built entirely on segment timings (they drive
+    every downstream .srt cue and dub timing slot), so only "whisper-1" can
+    drive it. The model remains an __init__ param the caller can override for
+    other use cases.
     """
 
     def __init__(self, model: str = "whisper-1") -> None:
@@ -129,14 +124,19 @@ class OpenAISpeak:
 
     Note: the spec's timing-drift strategy clamps the requested rate at the dub.py
     layer (0.9-1.15x). The OpenAI `speed` parameter itself supports a wider documented
-    range of 0.25 (slowest) to 4.0 (fastest), default 1.0. This class clamps to that
-    0.25-4.0 range, mirroring how elevenlabs.Speak clamps to ElevenLabs' 0.7-1.2 range.
+    range of 0.25 (slowest) to 4.0 (fastest), default 1.0; `speak()` clamps to that
+    0.25-4.0 range as a defensive floor/ceiling on whatever rate it is handed.
+
+    Default model is "tts-1", not "gpt-4o-mini-tts": gpt-4o-mini-tts accepts the
+    `speed` parameter but silently ignores it, which would make the dub path's
+    rate-fitting lever inert. tts-1 honours `speed`. gpt-4o-mini-tts remains
+    reachable via the constructor argument for callers that don't need `speed`.
     """
 
     def __init__(
         self,
         voice: str = "alloy",
-        model: str = "gpt-4o-mini-tts",
+        model: str = "tts-1",
     ) -> None:
         self.voice = voice
         self.model = model

@@ -13,6 +13,10 @@ logger = logging.getLogger("elevenlabs")
 
 _SENTENCE_END_CHARS = (".", "!", "?", "…")
 
+# ElevenLabs' documented voice_settings.speed range; see Speak's docstring.
+_MIN_SPEED = 0.7
+_MAX_SPEED = 1.2
+
 # A stock ElevenLabs voice ("Sarah"), multilingual-capable. Any voice_id works with
 # eleven_multilingual_v2/eleven_turbo_v2_5; this is just a documented default.
 _DEFAULT_VOICE_ID = "EXAVITQu4vr4xnSDxMaL"
@@ -61,7 +65,11 @@ class ScribeTranscribe:
         if words is None:
             transcripts = getattr(response, "transcripts", None)
             if not transcripts:
-                return iter(())
+                raise RuntimeError(
+                    f"Scribe transcription response (model '{self.model_id}') has neither "
+                    "a 'words' field nor a 'transcripts' field. The response shape may have "
+                    "changed; inspect it before assuming the audio is silent."
+                )
             words = transcripts[0].words
 
         return self._group_words(words)
@@ -74,7 +82,7 @@ class ScribeTranscribe:
 
         def flush() -> Segment | None:
             nonlocal segment_id
-            if not buffer:
+            if not buffer or buffer_start is None or buffer_end is None:
                 return None
             text = "".join(w.text for w in buffer).strip()
             if not text:
@@ -144,6 +152,7 @@ class Speak:
         return self.speak(text, out_path, speed)
 
     def speak(self, text: str, out_path: Path, speed: float = 1.0) -> Path:
+        speed = max(_MIN_SPEED, min(_MAX_SPEED, speed))
         logger.info(f"Synthesising {len(text)} chars to {out_path} (speed={speed:.3f})")
 
         audio_chunks = self.client.text_to_speech.convert(
