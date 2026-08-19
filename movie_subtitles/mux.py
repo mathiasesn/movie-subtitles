@@ -1,7 +1,9 @@
 import logging
 import shutil
-import subprocess
 from pathlib import Path
+
+from movie_subtitles.ffmpeg import audio_codec_for
+from movie_subtitles.ffmpeg import run as run_ffmpeg
 
 logger = logging.getLogger("mux")
 
@@ -14,11 +16,16 @@ def mux_dub(video_path: Path, audio_path: Path) -> Path:
     video's full duration is authoritative -- no `-shortest`, so a synthesised track that
     ends before the video does (e.g. no speech in the video's tail) does not truncate the
     video; ffmpeg pads the shorter audio stream with silence to the video's length.
+
+    The output keeps the source container, so the audio codec has to be one that container
+    accepts -- see `audio_codec_for`. The video track is always stream-copied, so the
+    source's video codec is by definition already legal in its own container.
     """
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg is not on PATH. Install ffmpeg to use --dub.")
 
     out_path = video_path.with_name(f"{video_path.stem}.dubbed{video_path.suffix}")
+    audio_codec = audio_codec_for(video_path.suffix)
 
     cmd = [
         "ffmpeg",
@@ -34,11 +41,11 @@ def mux_dub(video_path: Path, audio_path: Path) -> Path:
         "-c:v",
         "copy",
         "-c:a",
-        "aac",
+        audio_codec,
         str(out_path),
     ]
 
-    logger.info(f"Muxing dub track over {video_path} -> {out_path}")
-    subprocess.run(cmd, check=True, capture_output=True, text=True)
+    logger.info(f"Muxing dub track over {video_path} -> {out_path} (audio: {audio_codec})")
+    run_ffmpeg(cmd, what=f"Muxing the dub track into {out_path.name}")
 
     return out_path

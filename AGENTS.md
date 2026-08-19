@@ -22,6 +22,9 @@ movie_subtitles/
                     # timeline assembly via ffmpeg
   mux.py           # mux_dub(): overlays the finished audio track over the source video
                     # with ffmpeg, replacing (not mixing with) the original audio track
+  ffmpeg.py         # audio_codec_for() container->codec table + run(): the one place that
+                    # invokes ffmpeg and turns a non-zero exit into a RuntimeError quoting
+                    # its stderr, shared by dub.py and mux.py
   dubbing.py        # ManagedDub: the --managed path, independent of the rest
   providers/
     base.py          # Segment dataclass + ASRProvider / TranslationProvider /

@@ -3,6 +3,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from movie_subtitles.ffmpeg import run as run_ffmpeg
 from movie_subtitles.providers.base import Segment, TTSProvider
 
 logger = logging.getLogger("dub")
@@ -147,7 +148,7 @@ def _assemble_timeline(inputs: list[tuple[float, Path]], out_path: Path) -> Path
 
     if not inputs:
         # No segments to place; emit a minimal silent file.
-        subprocess.run(
+        run_ffmpeg(
             [
                 "ffmpeg",
                 "-y",
@@ -159,8 +160,7 @@ def _assemble_timeline(inputs: list[tuple[float, Path]], out_path: Path) -> Path
                 "0.1",
                 str(out_path),
             ],
-            check=True,
-            capture_output=True,
+            what=f"Writing the empty dub timeline to {out_path.name}",
         )
         return out_path
 
@@ -186,5 +186,5 @@ def _assemble_timeline(inputs: list[tuple[float, Path]], out_path: Path) -> Path
         str(out_path),
     ]
 
-    subprocess.run(cmd, check=True, capture_output=True, text=True)
+    run_ffmpeg(cmd, what=f"Assembling {len(inputs)} dub clip(s) into {out_path.name}")
     return out_path
