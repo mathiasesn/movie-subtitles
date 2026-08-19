@@ -57,6 +57,9 @@ def _build_translation_provider(translation_engine: str, mt_model_name: str) -> 
         raise ValueError(f"Unknown translation engine: {translation_engine}")
 
 
+_VALID_TTS_ENGINES = {"elevenlabs", "openai"}
+
+
 def _build_tts_provider(tts_engine: str) -> TTSProvider:
     if tts_engine == "elevenlabs":
         from movie_subtitles.providers.elevenlabs import Speak
@@ -129,6 +132,12 @@ def create_subtitles(
             "ignores budget_chars, so timing-drift fitting (step 1 of the drift strategy) "
             "is a silent no-op and the dub would be worse for no stated reason. Use "
             "--translation-engine anthropic (or --engine elevenlabs/openai) with --dub."
+        )
+
+    if dub and resolved_tts_engine not in _VALID_TTS_ENGINES:
+        raise ValueError(
+            f"--dub requires a usable TTS engine, but it resolved to '{resolved_tts_engine}'. "
+            "Pass --tts-engine {elevenlabs,openai} explicitly."
         )
 
     if managed:
