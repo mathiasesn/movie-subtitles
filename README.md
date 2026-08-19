@@ -13,7 +13,8 @@ Three pipelines live side by side behind `--engine`:
   below. See also [Which stages are ElevenLabs](#which-stages-are-elevenlabs-and-which-are-not),
   it is not "all ElevenLabs", and that is itself the interesting finding.
 - **`openai`**: OpenAI (`whisper-1`) for ASR, OpenAI chat completions for
-  translation, OpenAI (`gpt-4o-mini-tts`) for TTS. A second complete end-to-end pipeline,
+  translation, OpenAI (`tts-1` by default — see [OpenAI backend](#openai-backend) for
+  why not `gpt-4o-mini-tts`) for TTS. A second complete end-to-end pipeline,
   alongside the ElevenLabs one. See
   [OpenAI backend](#openai-backend) below for what is and isn't ElevenLabs here.
 
@@ -26,9 +27,10 @@ overridden independently with `--asr-engine`, `--translation-engine`, and `--tts
 — e.g. Scribe ASR with the local MADLAD400 translator
 (`--asr-engine elevenlabs --translation-engine local`), or a fully mixed pipeline
 (`--asr-engine elevenlabs --translation-engine openai --tts-engine openai`). Not every
-combination makes sense: `--dub` requires a length-budgeted translator, so
-`--translation-engine local` (or `--engine local`) combined with `--dub` is rejected —
-see [Timing drift](#timing-drift).
+combination makes sense: `--dub` works best with a length-budgeted translator, so
+`--translation-engine local` (or `--engine local`) combined with `--dub` logs a loud
+warning and proceeds — timing-drift fitting degrades to TTS-rate-only since MADLAD400
+ignores the length budget. See [Timing drift](#timing-drift).
 
 ## Breaking change: engine values name vendors, not pipelines
 
@@ -71,7 +73,7 @@ uv run movie-subtitles --input clip.mp4 --engine elevenlabs --translation-engine
 
 | Invocation | ASR | Translation | TTS |
 | --- | --- | --- | --- |
-| `--engine local` | faster-whisper | MADLAD400 | none (`--dub` rejected) |
+| `--engine local` | faster-whisper | MADLAD400 | none (`--dub` warns: timing fit degrades to TTS-rate-only) |
 | `--engine openai` | OpenAI | OpenAI | OpenAI |
 | `--engine elevenlabs` | Scribe | **error** | ElevenLabs |
 | `--engine elevenlabs --translation-engine anthropic` | Scribe | Claude | ElevenLabs |
@@ -174,9 +176,9 @@ options:
                         only
   --translation-engine {local,anthropic,openai}
                         Override --engine for the translation stage only.
-                        --dub requires this to resolve to 'anthropic' or
-                        'openai', since the local translator ignores the
-                        length budget
+                        --dub with this resolving to 'local' still works, but
+                        timing-drift fitting degrades to TTS-rate-only since
+                        the local translator ignores the length budget
   --tts-engine {elevenlabs,openai}
                         Override --engine for the TTS (dubbing) stage only
   --dub                 Synthesise the translated segments with TTS and mux
@@ -188,12 +190,21 @@ options:
                         ELEVENLABS_API_KEY). Mutually exclusive with --dub.
 ```
 
-`--engine local --dub` (or `--translation-engine local --dub`) is rejected up front with a
-`ValueError` explaining why, rather than silently shipping a worse dub:
+`--translation-engine local` combined with `--dub` (note: `--engine local --dub` alone
+still fails, since `local` has no usable TTS stage — see below) is allowed but logs a loud
+warning rather than silently shipping a worse dub:
+
+```shell
+$ uv run movie-subtitles --input clip.mp4 --engine openai --translation-engine local --dub
+[19/08/2026-14:21:12][WARNING][cli] --dub with the local MADLAD400 translator: it ignores budget_chars, so timing-drift fitting degrades to TTS-rate-only (step 1 of the drift strategy is a silent no-op). Use --translation-engine anthropic/openai for length-budgeted translations if the dub timing is off.
+```
+
+`--dub` still hard-fails if the TTS stage resolves to something unusable (e.g. plain
+`--engine local --dub`, where TTS falls back to `local`, which has no TTS backend at all):
 
 ```shell
 $ uv run movie-subtitles --input clip.mp4 --engine local --dub
-[19/08/2026-14:21:12][ERROR][cli] --dub requires a length-budgeted translator: the local MADLAD400 translator ignores budget_chars, so timing-drift fitting (step 1 of the drift strategy) is a silent no-op and the dub would be worse for no stated reason. Use --translation-engine anthropic (or --engine elevenlabs/openai) with --dub.
+[19/08/2026-14:21:12][ERROR][cli] --dub requires a usable TTS engine, but it resolved to 'local'. Pass --tts-engine {elevenlabs,openai} explicitly.
 $ echo $?
 1
 ```
@@ -264,13 +275,13 @@ plainly rather than discovered by reading code:
 |---|---|---|---|
 | ASR (speech-to-text) | **ElevenLabs Scribe** (`speech_to_text.convert`) | faster-whisper `large-v3` | **OpenAI** `whisper-1` — not ElevenLabs |
 | Translation | **Claude** (Anthropic API, `anthropic` SDK) — not ElevenLabs | MADLAD400 T5 (local) | **OpenAI** chat completions — not ElevenLabs |
-| TTS (`--dub`) | **ElevenLabs** (`text_to_speech.convert`) | not available | **OpenAI** `gpt-4o-mini-tts` — not ElevenLabs |
+| TTS (`--dub`) | **ElevenLabs** (`text_to_speech.convert`) | not available | **OpenAI** `tts-1` — not ElevenLabs |
 | `--managed` | **ElevenLabs Dubbing** (create/poll/download, does ASR+translation+TTS internally as one hosted job) | not applicable | not applicable (ElevenLabs-only surface) |
 
 **Plainly stated: on the `openai` engine, no stage is ElevenLabs.** OpenAI TTS in
 particular is worth calling out explicitly — it is easy to assume "TTS = ElevenLabs" by
 habit from the rest of this README, but `--tts-engine openai` (including as part of
-`--engine openai`) routes to `gpt-4o-mini-tts`, a completely different vendor and voice,
+`--engine openai`) routes to `tts-1` by default, a completely different vendor and voice,
 with its own speed/timing behaviour (see [OpenAI backend](#openai-backend) below).
 
 **Translation on the `elevenlabs` engine is not an ElevenLabs product call.** This was a
@@ -303,7 +314,11 @@ Anthropic:
   (`movie_subtitles/providers/openai_.py:OpenAITranslate`), honouring the same
   `budget_chars` length-budget contract as `LLMTranslate` (Claude), so `--dub` is
   permitted with `--translation-engine openai`.
-- **TTS**: `gpt-4o-mini-tts` (`movie_subtitles/providers/openai_.py:OpenAISpeak`).
+- **TTS**: `tts-1` by default (`movie_subtitles/providers/openai_.py:OpenAISpeak`).
+  `gpt-4o-mini-tts` accepts a `speed` parameter but silently ignores it, which would make
+  the dub path's rate-fitting lever inert, so it is not the default — `tts-1` honours
+  `speed`. `gpt-4o-mini-tts` is still reachable via the constructor's `model` argument for
+  callers that don't need the rate lever.
 
 **None of these three are ElevenLabs stages.** OpenAI is the only vendor besides
 ElevenLabs able to back every stage of the pipeline (Anthropic only ever covered
@@ -335,16 +350,20 @@ audio for segment N can spill into segment N+1's slot, or leave large silent gap
    chars/second speaking-rate constant — not a measured value, see below) turns that into
    a target character count, passed to the Claude translation prompt as "translate within
    roughly N characters."
-2. The segment is synthesised via ElevenLabs TTS and the actual audio duration is
-   measured with `ffprobe` (`movie_subtitles/dub.py:_synthesise_fitted`).
-3. If it overruns the slot, the TTS speaking rate (`voice_settings.speed`)
-   is adjusted and the segment is re-synthesised once, **clamped to 0.9–1.15x**
-   (`movie_subtitles/dub.py:_MIN_RATE` / `_MAX_RATE`).
-4. If the segment still does not fit at the clamp bound, it is left to overrun into the
-   following silence rather than distorting the voice further. Each such segment is
-   logged, and the run reports a total count of unfittable segments
+2. The segment is synthesised via the resolved TTS provider (ElevenLabs or OpenAI) and
+   the actual audio duration is measured with `ffprobe`
+   (`movie_subtitles/dub.py:_synthesise_fitted`).
+3. If it over- or underruns the slot, the TTS speaking rate is adjusted and the segment
+   is re-synthesised once, **clamped to 0.9–1.15x**
+   (`movie_subtitles/dub.py:_MIN_RATE` / `_MAX_RATE`). Both directions get re-synthesised
+   at the clamped rate; only the still-overrunning case (below) is treated as a problem
+   worth logging.
+4. If the segment still overruns its slot at the clamp bound after the retry, it is left
+   to overrun into the following silence rather than distorting the voice further. Each
+   such segment is logged, and the run reports a total count of still-overrunning segments
    (`movie_subtitles/dub.py:synthesise_track`) — see the placeholder in
-   [Results](#results) for the count on the test clip.
+   [Results](#results) for the count on the test clip. An underrun that still falls short
+   after the retry is not counted or logged as a problem — it just leaves trailing silence.
 
 **The clamp is a deliberate tightening, not the API's limit.** ElevenLabs' own documented
 speed range for `voice_settings.speed` is wider — **0.7 to 1.2**
@@ -353,11 +372,11 @@ with a note that extreme values can degrade audio quality. This implementation c
 0.9–1.15x specifically to keep the rate adjustment inaudible, at the cost of fitting fewer
 segments purely through rate change.
 
-**Only overruns are corrected.** The current implementation adjusts rate only when audio
-is *longer* than its slot. An underrun (translated audio shorter than the slot) is not
-stretched to fill the gap — it is simply left to sit in silence for the remainder of the
-slot. This is an honest gap, not a design choice with a stated rationale; it just wasn't
-built.
+**Both overruns and underruns are corrected the same way.** Rate adjustment now runs when
+audio is either longer or shorter than its slot — an underrun (translated audio shorter
+than the slot) triggers the same clamped-rate re-synthesis as an overrun, slowing the
+speech down rather than leaving it to sit in silence for the whole gap. Only a clip that
+still overruns its slot after the retry is logged and left to overrun.
 
 **Considered, not implemented:**
 
