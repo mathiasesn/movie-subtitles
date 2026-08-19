@@ -14,6 +14,11 @@ logger = logging.getLogger("dub")
 _MIN_RATE = 0.9
 _MAX_RATE = 1.15
 
+# Product policy, in the same vein as _MIN_RATE/_MAX_RATE above: past this ideal rate the
+# clip is more than twice its slot, so a +-15% clamped nudge is noise against the mismatch
+# and not worth paying for a second TTS call.
+_HOPELESS_RATE = 2.0
+
 
 def _ideal_rate(actual_duration: float, slot_duration: float) -> float:
     """The unclamped rate that would make `actual_duration` fill `slot_duration` exactly."""
@@ -69,11 +74,27 @@ def _synthesise_fitted(
     tts(text, clip_path, speed=1.0)
     duration = _probe_duration(clip_path)
 
-    rate = fit_rate(duration, slot_duration)
     ideal = _ideal_rate(duration, slot_duration)
+
+    # A slot the clamp cannot meaningfully help -- either hopelessly short relative to
+    # the clip, or not a real slot at all -- is not worth a second TTS call. Place the
+    # clip unfitted at 1.0x rather than pay for a +-15% nudge that is noise against the
+    # mismatch. It still lands on the timeline: dropping the line is worse than an
+    # overrun into the following silence.
+    if slot_duration <= 0 or ideal > _HOPELESS_RATE:
+        logger.warning(
+            f"Segment {segment_id} ({duration:.2f}s audio vs {slot_duration:.2f}s slot) is "
+            "hopelessly mismatched; leaving it unfitted at 1.0x and letting it overrun into "
+            "the following silence by design."
+        )
+        return clip_path, True
+
+    rate = fit_rate(duration, slot_duration)
+    clamped = False
     # A clamped rate is always 0.9 or 1.15, so it can never round to 1.00: every clamped
     # segment goes through this branch and is reported once, at warning level.
     if round(rate, 2) != 1.0:
+        clamped = True
         drift = "overruns" if rate > 1.0 else "underruns"
         if rate != ideal:
             logger.warning(
@@ -93,11 +114,18 @@ def _synthesise_fitted(
     still_overruns = duration > slot_duration
 
     if still_overruns:
-        logger.warning(
-            f"Segment {segment_id} does not fit its slot even at the {rate:.2f}x rate "
-            f"clamp ({duration:.2f}s audio vs {slot_duration:.2f}s slot); letting it "
-            "overrun into the following silence."
-        )
+        if clamped:
+            logger.warning(
+                f"Segment {segment_id} does not fit its slot even at the {rate:.2f}x rate "
+                f"clamp ({duration:.2f}s audio vs {slot_duration:.2f}s slot); letting it "
+                "overrun into the following silence."
+            )
+        else:
+            logger.warning(
+                f"Segment {segment_id} does not fit its slot at the natural 1.0x rate; no "
+                f"clamp was applied ({duration:.2f}s audio vs {slot_duration:.2f}s slot); "
+                "letting it overrun into the following silence."
+            )
 
     return clip_path, still_overruns
 
