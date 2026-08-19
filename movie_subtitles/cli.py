@@ -174,16 +174,20 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    create_subtitles(
-        args.input,
-        args.audio_lang,
-        args.srt_lang,
-        args.whisper_model,
-        args.mt_model,
-        engine=args.engine,
-        dub=args.dub,
-        managed=args.managed,
-    )
+    try:
+        create_subtitles(
+            args.input,
+            args.audio_lang,
+            args.srt_lang,
+            args.whisper_model,
+            args.mt_model,
+            engine=args.engine,
+            dub=args.dub,
+            managed=args.managed,
+        )
+    except (RuntimeError, ValueError, FileNotFoundError, TimeoutError) as exc:
+        logger.error(str(exc))
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":
