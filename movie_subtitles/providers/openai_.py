@@ -36,6 +36,21 @@ class OpenAITranscribe:
     every downstream .srt cue and dub timing slot), so only "whisper-1" can
     drive it. The model remains an __init__ param the caller can override for
     other use cases.
+
+    Confirmed limitation (diagnostic, 2026-08-19, on a music-heavy trailer -- see
+    specs/fix-smoke-run-findings.md): "whisper-1"'s segment timestamps degrade to
+    uniform 1.000s spans on music-heavy or dialogue-sparse audio. This is vendor
+    behaviour, not a mapping bug -- the same distortion was present in the raw API
+    response before it ever reached _yield_segments(), which was checked and needs
+    no fix. The visible symptom is long runs of contiguous, identical-length segments,
+    often carrying repeated or filler text (e.g. dozens of consecutive 1.000s segments
+    all reading "Ow!"), which is the model falling back to a fixed cadence when it
+    cannot align timestamps to real speech. The trigger appears to be audio that is
+    music-heavy, sparse in dialogue, or carries non-speech vocalisations over score --
+    exactly what a movie trailer is. Because every downstream .srt cue and dub timing
+    slot derives straight from these segment boundaries, the consequence is not just
+    bad dub timing: the .srt file itself carries wrong cue timings. On such material,
+    "--asr-engine elevenlabs" is the workaround.
     """
 
     def __init__(self, model: str = "whisper-1") -> None:
