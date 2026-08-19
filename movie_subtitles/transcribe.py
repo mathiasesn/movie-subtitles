@@ -1,6 +1,6 @@
 import logging
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 from faster_whisper import WhisperModel
 from faster_whisper.transcribe import Segment
@@ -18,9 +18,7 @@ class Transcribe:
     def __call__(self, fpath: str | Path, audio_lang: str = "en") -> Iterable[Segment]:
         return self.transcribe(fpath, audio_lang)
 
-    def transcribe(
-        self, fpath: str | Path, audio_lang: str = "en"
-    ) -> Iterable[Segment]:
+    def transcribe(self, fpath: str | Path, audio_lang: str = "en") -> Iterable[Segment]:
         if isinstance(fpath, Path):
             fpath = fpath.as_posix()
 

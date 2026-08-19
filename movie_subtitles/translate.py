@@ -10,9 +10,7 @@ class Translate:
         self.model_name = model_name
 
         logger.info(f"Loading model {model_name}")
-        self.model = T5ForConditionalGeneration.from_pretrained(
-            self.model_name, device_map="auto"
-        )
+        self.model = T5ForConditionalGeneration.from_pretrained(self.model_name, device_map="auto")
         self.tokenizer = T5Tokenizer.from_pretrained(self.model_name)
 
     def __call__(self, text: str, output_lang: str) -> str:
@@ -20,9 +18,7 @@ class Translate:
 
     def translate(self, text: str, output_lang: str) -> str:
         text = f"<2{output_lang}> {text}"
-        input_ids = self.tokenizer(text, return_tensors="pt").input_ids.to(
-            self.model.device
-        )
+        input_ids = self.tokenizer(text, return_tensors="pt").input_ids.to(self.model.device)
         outputs = self.model.generate(input_ids=input_ids)
         text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
 

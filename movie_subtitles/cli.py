@@ -39,7 +39,9 @@ def create_subtitles(
         if not text:
             continue
 
-        segment = f"{segment_id}\n{start_time} --> {end_time}\n{text[1:] if text[0] == ' ' else text}\n\n"
+        segment = (
+            f"{segment_id}\n{start_time} --> {end_time}\n{text[1:] if text[0] == ' ' else text}\n\n"
+        )
         srt_lines.append(segment)
 
     srt_file.write_text("".join(srt_lines), encoding="utf-8")
