@@ -4,22 +4,30 @@ Command line interface for creating movie subtitles either as .srt files or by a
 
 ## Prerequisites
 
-- Python => 3.10
+- Python >= 3.10
+- [uv](https://docs.astral.sh/uv/getting-started/installation/)
 
 ## Installation
 
-Install from git (recommend)
+Run without installing (recommended)
 
 ```shell
-pip install git+https://github.com/mathiasesn/movie-subtitles.git
+uvx --from git+https://github.com/mathiasesn/movie-subtitles.git movie-subtitles --help
 ```
 
-Install locally
+Install as a tool
+
+```shell
+uv tool install git+https://github.com/mathiasesn/movie-subtitles.git
+```
+
+Develop locally
 
 ```shell
 git clone https://github.com/mathiasesn/movie-subtitles.git
 cd movie-subtitles
-pip install -e .
+uv sync
+uv run movie-subtitles --help
 ```
 
 ## Usage
