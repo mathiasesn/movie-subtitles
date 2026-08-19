@@ -1,8 +1,9 @@
-from datetime import timedelta
-
-
 def format_timestamp(seconds: float) -> str:
-    return str(0) + str(timedelta(seconds=int(seconds))) + ",000"
+    total_ms = round(seconds * 1000)
+    hours, remainder_ms = divmod(total_ms, 3_600_000)
+    minutes, remainder_ms = divmod(remainder_ms, 60_000)
+    secs, millis = divmod(remainder_ms, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
 def format_block(index: int, start: float, end: float, text: str) -> str:

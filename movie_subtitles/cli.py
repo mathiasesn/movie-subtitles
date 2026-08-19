@@ -113,11 +113,11 @@ def create_subtitles(
         )
 
     if dub and resolved_translation_engine == "local":
-        raise ValueError(
-            "--dub requires a length-budgeted translator: the local MADLAD400 translator "
-            "ignores budget_chars, so timing-drift fitting (step 1 of the drift strategy) "
-            "is a silent no-op and the dub would be worse for no stated reason. Use "
-            "--translation-engine anthropic (or --engine elevenlabs/openai) with --dub."
+        logger.warning(
+            "--dub with the local MADLAD400 translator: it ignores budget_chars, so "
+            "timing-drift fitting degrades to TTS-rate-only (step 1 of the drift "
+            "strategy is a silent no-op). Use --translation-engine anthropic/openai for "
+            "length-budgeted translations if the dub timing is off."
         )
 
     if dub and resolved_tts_engine not in TTS_ENGINES:
@@ -208,6 +208,8 @@ def _dub_and_mux(
     dubbed_path = mux_dub(fpath, audio_track)
     logger.info(f"Saved dubbed video to {dubbed_path}")
 
+    audio_track.unlink()
+
 
 def main() -> None:
     parser = ArgumentParser(
@@ -266,9 +268,9 @@ def main() -> None:
         type=str,
         choices=["local", "anthropic", "openai"],
         default=None,
-        help="Override --engine for the translation stage only. --dub requires this to "
-        "resolve to 'anthropic' or 'openai', since the local translator ignores the "
-        "length budget",
+        help="Override --engine for the translation stage only. --dub with this resolving "
+        "to 'local' still works, but timing-drift fitting degrades to TTS-rate-only "
+        "since the local translator ignores the length budget",
     )
     parser.add_argument(
         "--tts-engine",

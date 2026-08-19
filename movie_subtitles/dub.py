@@ -14,20 +14,16 @@ _MIN_RATE = 0.9
 _MAX_RATE = 1.15
 
 
-def fit_rate(actual_duration: float, slot_duration: float) -> tuple[float, bool]:
+def fit_rate(actual_duration: float, slot_duration: float) -> float:
     """Compute the speaking rate needed to fit `actual_duration` into `slot_duration`.
 
-    Returns (rate, unfittable) where `rate` is clamped to [_MIN_RATE, _MAX_RATE] and
-    `unfittable` is True if the clamped rate still cannot make the audio fit the slot
-    (i.e. the ideal rate fell outside the clamp).
+    Returns the rate clamped to [_MIN_RATE, _MAX_RATE].
     """
     if slot_duration <= 0 or actual_duration <= 0:
-        return 1.0, False
+        return 1.0
 
     ideal_rate = actual_duration / slot_duration
-    rate = min(max(ideal_rate, _MIN_RATE), _MAX_RATE)
-    unfittable = rate != ideal_rate
-    return rate, unfittable
+    return min(max(ideal_rate, _MIN_RATE), _MAX_RATE)
 
 
 def _probe_duration(fpath: Path) -> float:
@@ -56,38 +52,49 @@ def _synthesise_fitted(
     out_dir: Path,
     segment_id: int,
 ) -> tuple[Path, bool]:
-    """Synthesise `text`, re-synthesising at an adjusted rate if it does not fit.
+    """Synthesise `text`, re-synthesising at an adjusted rate if it over- or underruns.
 
-    Returns (clip_path, unfittable) where `unfittable` is True if the segment's actual,
-    re-measured duration still does not fit the slot after the clamped-rate re-synthesis
-    (not merely whether the ideal rate fell outside the clamp -- the clamped rate is an
-    approximation and re-synthesis can still land short or long of the slot).
+    Returns (clip_path, still_overruns) where `still_overruns` is True if the segment's
+    actual, re-measured duration still overruns the slot after the clamped-rate
+    re-synthesis (not merely whether the ideal rate fell outside the clamp -- the clamped
+    rate is an approximation and re-synthesis can still land long of the slot). An
+    underrun never counts here: it just leaves trailing silence in the slot.
     """
     clip_path = out_dir / f"segment_{segment_id:05d}.mp3"
     tts(text, clip_path, speed=1.0)
     duration = _probe_duration(clip_path)
 
-    if duration <= slot_duration:
+    if duration == slot_duration:
         return clip_path, False
 
-    rate, _ = fit_rate(duration, slot_duration)
-    if rate != 1.0:
+    rate = fit_rate(duration, slot_duration)
+    ideal_rate = duration / slot_duration if slot_duration > 0 else 1.0
+    if rate != ideal_rate:
+        logger.warning(
+            f"Segment {segment_id} needs rate {ideal_rate:.2f}x to fit its slot, clamped "
+            f"to {rate:.2f}x ({duration:.2f}s audio vs {slot_duration:.2f}s slot)."
+        )
+    if round(rate, 2) != 1.0:
+        if rate > 1.0:
+            logger.info(f"Segment {segment_id} overruns its slot; speeding up to {rate:.2f}x.")
+        else:
+            logger.info(f"Segment {segment_id} underruns its slot; slowing down to {rate:.2f}x.")
         tts(text, clip_path, speed=rate)
         duration = _probe_duration(clip_path)
 
     # Re-measure the clip that will actually be placed on the timeline: the fit is
     # judged by whether it actually fits its slot now, not by whether the ideal rate was
     # inside the clamp.
-    unfittable = duration > slot_duration
+    still_overruns = duration > slot_duration
 
-    if unfittable:
+    if still_overruns:
         logger.warning(
             f"Segment {segment_id} does not fit its slot even at the {rate:.2f}x rate "
             f"clamp ({duration:.2f}s audio vs {slot_duration:.2f}s slot); letting it "
             "overrun into the following silence."
         )
 
-    return clip_path, unfittable
+    return clip_path, still_overruns
 
 
 def synthesise_track(
@@ -108,7 +115,7 @@ def synthesise_track(
         work_dir = Path(tempfile.mkdtemp(prefix="movie-subtitles-dub-"))
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    unfittable_count = 0
+    overrun_count = 0
     inputs: list[tuple[float, Path]] = []
 
     for segment in segments:
@@ -117,12 +124,14 @@ def synthesise_track(
             continue
 
         slot_duration = max(segment.end - segment.start, 0.0)
-        clip_path, unfittable = _synthesise_fitted(tts, text, slot_duration, work_dir, segment.id)
-        if unfittable:
-            unfittable_count += 1
+        clip_path, still_overruns = _synthesise_fitted(
+            tts, text, slot_duration, work_dir, segment.id
+        )
+        if still_overruns:
+            overrun_count += 1
         inputs.append((segment.start, clip_path))
 
-    logger.info(f"{unfittable_count} segment(s) could not be fitted within the rate clamp")
+    logger.info(f"{overrun_count} segment(s) still overrun their slot after the rate clamp")
 
     _assemble_timeline(inputs, out_path)
     return out_path
