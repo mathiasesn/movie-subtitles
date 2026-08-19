@@ -4,6 +4,7 @@ from pathlib import Path
 
 from tqdm.auto import tqdm
 
+from movie_subtitles.providers.base import Segment
 from movie_subtitles.srt import format_block
 
 logger = logging.getLogger("cli")
@@ -41,6 +42,7 @@ def create_subtitles(
     whisper_model_name: str = "large-v3",
     mt_model_name: str = "jbochi/madlad400-3b-mt",
     engine: str = "local",
+    dub: bool = False,
 ) -> None:
     if isinstance(fpath, str):
         fpath = Path(fpath)
@@ -51,6 +53,8 @@ def create_subtitles(
     segments = transcriber(fpath, audio_lang)
 
     srt_lines = []
+    dub_segments: list[Segment] = []
+    dub_translations: dict[int, str] = {}
     for segment in tqdm(segments, desc="Writing to srt file"):
         segment_id = segment.id + 1
 
@@ -61,8 +65,33 @@ def create_subtitles(
 
         srt_lines.append(format_block(segment_id, segment.start, segment.end, text))
 
+        if dub:
+            dub_segments.append(segment)
+            dub_translations[segment.id] = text
+
     srt_file.write_text("".join(srt_lines), encoding="utf-8")
     logger.info(f"Saved srt file to {srt_file}")
+
+    if dub:
+        _dub_and_mux(fpath, dub_segments, dub_translations)
+
+
+def _dub_and_mux(
+    fpath: Path,
+    segments: list[Segment],
+    translations: dict[int, str],
+) -> None:
+    from movie_subtitles.dub import synthesise_track
+    from movie_subtitles.mux import mux_dub
+    from movie_subtitles.providers.elevenlabs import Speak
+
+    audio_track = fpath.with_name(f"{fpath.stem}.dub_audio.mp3")
+    tts = Speak()
+
+    synthesise_track(segments, translations, tts, audio_track)
+
+    dubbed_path = mux_dub(fpath, audio_track)
+    logger.info(f"Saved dubbed video to {dubbed_path}")
 
 
 def main() -> None:
@@ -107,6 +136,14 @@ def main() -> None:
         default="local",
         help="The provider engine to use for transcription and translation",
     )
+    parser.add_argument(
+        "--dub",
+        action="store_true",
+        help=(
+            "Synthesise the translated segments with ElevenLabs TTS and mux them over "
+            "the source video (requires ffmpeg and ELEVENLABS_API_KEY)"
+        ),
+    )
     args = parser.parse_args()
 
     create_subtitles(
@@ -116,6 +153,7 @@ def main() -> None:
         args.whisper_model,
         args.mt_model,
         engine=args.engine,
+        dub=args.dub,
     )
 
 
