@@ -11,6 +11,10 @@ dependencies = [
     "faster-whisper",
     "transformers",
     "torch",
+    # providers/local.py passes device_map= to from_pretrained, which transformers
+    # only accepts when accelerate is installed. --engine local cannot translate
+    # without it.
+    "accelerate",
     "elevenlabs",
     "anthropic",
     "openai",
