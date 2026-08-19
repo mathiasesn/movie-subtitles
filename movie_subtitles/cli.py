@@ -1,14 +1,25 @@
 import logging
 from argparse import ArgumentParser
-from datetime import timedelta
 from pathlib import Path
 
 from tqdm.auto import tqdm
 
-from movie_subtitles.transcribe import Transcribe
-from movie_subtitles.translate import Translate
+from movie_subtitles.srt import format_block
 
 logger = logging.getLogger("cli")
+
+
+def _build_providers(engine: str, whisper_model_name: str, mt_model_name: str):
+    if engine == "local":
+        from movie_subtitles.providers.local import Transcribe, Translate
+
+        return Transcribe(whisper_model_name), Translate(mt_model_name)
+    elif engine == "elevenlabs":
+        raise NotImplementedError(
+            "The 'elevenlabs' engine is not implemented yet (coming in a later stage)."
+        )
+    else:
+        raise ValueError(f"Unknown engine: {engine}")
 
 
 def create_subtitles(
@@ -17,32 +28,25 @@ def create_subtitles(
     srt_lang: str = "da",
     whisper_model_name: str = "large-v3",
     mt_model_name: str = "jbochi/madlad400-3b-mt",
+    engine: str = "local",
 ) -> None:
     if isinstance(fpath, str):
         fpath = Path(fpath)
 
     srt_file = fpath.with_suffix(".srt")
 
-    transcriber = Transcribe(whisper_model_name)
+    transcriber, translator = _build_providers(engine, whisper_model_name, mt_model_name)
     segments = transcriber(fpath, audio_lang)
-
-    translator = Translate(mt_model_name)
 
     srt_lines = []
     for segment in tqdm(segments, desc="Writing to srt file"):
-        start_time = str(0) + str(timedelta(seconds=int(segment.start))) + ",000"
-        end_time = str(0) + str(timedelta(seconds=int(segment.end))) + ",000"
-        text = segment.text
         segment_id = segment.id + 1
 
-        text = translator(text, srt_lang)
+        text = translator(segment.text, srt_lang)
         if not text:
             continue
 
-        segment = (
-            f"{segment_id}\n{start_time} --> {end_time}\n{text[1:] if text[0] == ' ' else text}\n\n"
-        )
-        srt_lines.append(segment)
+        srt_lines.append(format_block(segment_id, segment.start, segment.end, text))
 
     srt_file.write_text("".join(srt_lines), encoding="utf-8")
     logger.info(f"Saved srt file to {srt_file}")
@@ -83,6 +87,13 @@ def main() -> None:
         default="jbochi/madlad400-3b-mt",
         help="The machine translation model to use",
     )
+    parser.add_argument(
+        "--engine",
+        type=str,
+        choices=["local", "elevenlabs"],
+        default="local",
+        help="The provider engine to use for transcription and translation",
+    )
     args = parser.parse_args()
 
     create_subtitles(
@@ -91,6 +102,7 @@ def main() -> None:
         args.srt_lang,
         args.whisper_model,
         args.mt_model,
+        engine=args.engine,
     )
 
 
