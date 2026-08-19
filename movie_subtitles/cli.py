@@ -9,15 +9,27 @@ from movie_subtitles.srt import format_block
 logger = logging.getLogger("cli")
 
 
+# Assumption, not a measured value: rough average speaking rate used to derive a
+# character budget from a segment's duration. Tune this once real dubs are assessed.
+_CHARS_PER_SECOND = 15.0
+
+
+def _budget_chars(start: float, end: float) -> int:
+    """Derive a translation length budget (in characters) from a segment's duration."""
+    duration = max(end - start, 0.0)
+    return max(int(duration * _CHARS_PER_SECOND), 1)
+
+
 def _build_providers(engine: str, whisper_model_name: str, mt_model_name: str):
     if engine == "local":
         from movie_subtitles.providers.local import Transcribe, Translate
 
         return Transcribe(whisper_model_name), Translate(mt_model_name)
     elif engine == "elevenlabs":
-        raise NotImplementedError(
-            "The 'elevenlabs' engine is not implemented yet (coming in a later stage)."
-        )
+        from movie_subtitles.providers.elevenlabs import ScribeTranscribe
+        from movie_subtitles.providers.llm import LLMTranslate
+
+        return ScribeTranscribe(), LLMTranslate()
     else:
         raise ValueError(f"Unknown engine: {engine}")
 
@@ -42,7 +54,8 @@ def create_subtitles(
     for segment in tqdm(segments, desc="Writing to srt file"):
         segment_id = segment.id + 1
 
-        text = translator(segment.text, srt_lang)
+        budget_chars = _budget_chars(segment.start, segment.end)
+        text = translator(segment.text, srt_lang, budget_chars=budget_chars)
         if not text:
             continue
 

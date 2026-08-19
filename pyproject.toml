@@ -11,6 +11,8 @@ dependencies = [
     "faster-whisper",
     "transformers",
     "torch",
+    "elevenlabs",
+    "anthropic",
 ]
 
 [project.urls]
