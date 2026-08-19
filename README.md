@@ -119,10 +119,16 @@ uv run movie-subtitles --help
 ## Setup: API keys
 
 The `elevenlabs` engine, the `openai` engine, `--dub`, and `--managed` all need one or
-more of these environment variables. They are read from the environment only — never
-write a real key into a file in this repo. A `.env.example` at the repo root lists all
-three as placeholders; copy it to `.env` and fill in real values locally (never commit
-the filled-in file):
+more of these environment variables. Never write a real key into a file that is tracked
+by git. A `.env.example` at the repo root lists all three as placeholders; copy it to
+`.env` and fill in real values locally — `.env` is gitignored, and `main()` loads it on
+startup, searching upward from the directory you run in:
+
+```shell
+cp .env.example .env    # then fill in the three real values
+```
+
+Exported variables work too, and take precedence over `.env`:
 
 ```shell
 export ELEVENLABS_API_KEY="<your-elevenlabs-key>"
@@ -559,8 +565,8 @@ the `.srt` timings against the translated text lengths.
 - **Underrun correction** in the timing-drift strategy (see above).
 - Speaker diarisation / distinct voices per speaker in the dub.
 - Realtime/streaming Scribe or TTS.
-- A config-file or env-var layer beyond the three API keys — everything else is a CLI
-  flag.
+- A config-file layer, or any environment variable beyond the three API keys —
+  everything else is a CLI flag. `.env` is loaded for those keys only.
 
 ## What I'd do differently / what is unverified
 

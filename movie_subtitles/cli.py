@@ -4,6 +4,7 @@ import subprocess
 from argparse import ArgumentParser
 from pathlib import Path
 
+from dotenv import find_dotenv, load_dotenv
 from tqdm.auto import tqdm
 
 from movie_subtitles.providers.base import ASRProvider, Segment, TranslationProvider, TTSProvider
@@ -211,7 +212,28 @@ def _dub_and_mux(
     audio_track.unlink()
 
 
+def _load_env() -> None:
+    """Load API keys from a .env file found by searching upward from the cwd.
+
+    Called from main() only: importing this module stays side-effect free for library
+    callers, who set the environment themselves. usecwd=True is deliberate -- the
+    default resolves .env relative to *this file*, which finds the repo's own .env even
+    when the user is working in some other project. Searching from the cwd instead means
+    the .env belonging to the directory you invoked the CLI from is the one that wins.
+
+    Already-exported variables are never overridden, so a real environment variable
+    still beats the file. A missing .env is not an error: providers raise their own
+    RuntimeError naming the specific key they need.
+    """
+    dotenv_path = find_dotenv(usecwd=True)
+    if dotenv_path:
+        load_dotenv(dotenv_path)
+        logger.info(f"Loaded environment from {dotenv_path}")
+
+
 def main() -> None:
+    _load_env()
+
     parser = ArgumentParser(
         "Command line interface for movie subtitles",
         usage="translation-cli <command> [<args>]",

@@ -18,6 +18,9 @@ dependencies = [
     "elevenlabs",
     "anthropic",
     "openai",
+    # main() loads .env before building any provider, so the API keys can live in a
+    # gitignored file instead of being exported into every shell.
+    "python-dotenv",
 ]
 
 [project.urls]
