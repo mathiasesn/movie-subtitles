@@ -12,7 +12,7 @@ Three pipelines live side by side behind `--engine`:
   vendors, not pipelines](#breaking-change-engine-values-name-vendors-not-pipelines)
   below. See also [Which stages are ElevenLabs](#which-stages-are-elevenlabs-and-which-are-not),
   it is not "all ElevenLabs", and that is itself the interesting finding.
-- **`openai`**: OpenAI (`gpt-4o-transcribe`) for ASR, OpenAI chat completions for
+- **`openai`**: OpenAI (`whisper-1`) for ASR, OpenAI chat completions for
   translation, OpenAI (`gpt-4o-mini-tts`) for TTS. A second complete end-to-end pipeline,
   alongside the ElevenLabs one. See
   [OpenAI backend](#openai-backend) below for what is and isn't ElevenLabs here.
@@ -262,7 +262,7 @@ plainly rather than discovered by reading code:
 
 | Stage | `--engine elevenlabs` (+ `--translation-engine anthropic`) | `--engine local` | `--engine openai` |
 |---|---|---|---|
-| ASR (speech-to-text) | **ElevenLabs Scribe** (`speech_to_text.convert`) | faster-whisper `large-v3` | **OpenAI** `gpt-4o-transcribe` — not ElevenLabs |
+| ASR (speech-to-text) | **ElevenLabs Scribe** (`speech_to_text.convert`) | faster-whisper `large-v3` | **OpenAI** `whisper-1` — not ElevenLabs |
 | Translation | **Claude** (Anthropic API, `anthropic` SDK) — not ElevenLabs | MADLAD400 T5 (local) | **OpenAI** chat completions — not ElevenLabs |
 | TTS (`--dub`) | **ElevenLabs** (`text_to_speech.convert`) | not available | **OpenAI** `gpt-4o-mini-tts` — not ElevenLabs |
 | `--managed` | **ElevenLabs Dubbing** (create/poll/download, does ASR+translation+TTS internally as one hosted job) | not applicable | not applicable (ElevenLabs-only surface) |
@@ -297,7 +297,7 @@ translator on this engine.
 openai` / `--tts-engine openai`) routes to the OpenAI API instead of ElevenLabs or
 Anthropic:
 
-- **ASR**: `gpt-4o-transcribe` (`movie_subtitles/providers/openai_.py:OpenAITranscribe`),
+- **ASR**: `whisper-1` (`movie_subtitles/providers/openai_.py:OpenAITranscribe`),
   normalised into the same `Segment` shape faster-whisper and Scribe produce.
 - **Translation**: OpenAI chat completions
   (`movie_subtitles/providers/openai_.py:OpenAITranslate`), honouring the same
@@ -411,13 +411,14 @@ is `TBD` until the repo owner runs the commands and fills them in.
 
 ### ASR: Scribe vs. faster-whisper vs. OpenAI, English clip
 
+
 ```shell
 movie-subtitles --input samples/en_clip.mp4 --engine local           # writes en_clip.srt
 movie-subtitles --input samples/en_clip.mp4 --asr-engine elevenlabs --translation-engine anthropic  # writes en_clip.srt (overwrite; rename to compare)
 movie-subtitles --input samples/en_clip.mp4 --asr-engine openai --translation-engine openai         # writes en_clip.srt (overwrite; rename to compare)
 ```
 
-| Metric | faster-whisper `large-v3` | ElevenLabs Scribe | OpenAI `gpt-4o-transcribe` |
+| Metric | faster-whisper `large-v3` | ElevenLabs Scribe | OpenAI `whisper-1` |
 |---|---|---|---|
 | Transcript accuracy (impression) | TBD — not yet run | TBD — not yet run | TBD — not yet run |
 | Wall-clock time | TBD — not yet run | TBD — not yet run | TBD — not yet run |
@@ -431,7 +432,7 @@ movie-subtitles --input samples/da_clip.mp4 --audio-lang da --srt-lang en --asr-
 movie-subtitles --input samples/da_clip.mp4 --audio-lang da --srt-lang en --asr-engine openai --translation-engine openai
 ```
 
-| Metric | faster-whisper `large-v3` | ElevenLabs Scribe | OpenAI `gpt-4o-transcribe` |
+| Metric | faster-whisper `large-v3` | ElevenLabs Scribe | OpenAI `whisper-1` |
 |---|---|---|---|
 | Danish transcript accuracy (impression) | TBD — not yet run | TBD — not yet run | TBD — not yet run |
 | Wall-clock time | TBD — not yet run | TBD — not yet run | TBD — not yet run |

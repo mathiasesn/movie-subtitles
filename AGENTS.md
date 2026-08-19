@@ -6,7 +6,7 @@ Guidance for AI coding agents working in this repository.
 
 ## What this project is
 
-`movie-subtitles` turns a video/audio file into a translated `.srt` file, and optionally into a dubbed video with a synthesised translated audio track. Two pipelines live behind `--engine {local,elevenlabs}` (per-stage overridable via `--asr-engine`/`--translation-engine`): `local` is faster-whisper ASR → local MADLAD400 T5 translation, fully offline; `elevenlabs` is ElevenLabs Scribe ASR → Claude (Anthropic API) translation. `--dub` synthesises the translated segments with ElevenLabs TTS, fits them to their timing slots, and muxes them over the source video with ffmpeg. `--managed` bypasses this repo's pipeline entirely and calls the ElevenLabs Dubbing job API (create/poll/download) instead.
+`movie-subtitles` turns a video/audio file into a translated `.srt` file, and optionally into a dubbed video with a synthesised translated audio track. Engine values name vendors, not pipelines, and each stage is independently overridable: `--asr-engine {local,elevenlabs,openai}`, `--translation-engine {local,anthropic,openai}`, `--tts-engine {elevenlabs,openai}`. `--engine {local,elevenlabs,openai}` is a shorthand that sets all three when the per-stage flags are not given — `local` is faster-whisper ASR → local MADLAD400 T5 translation, fully offline; `openai` is OpenAI ASR → OpenAI chat-completions translation → OpenAI TTS; `--engine elevenlabs` alone raises `ValueError`, since ElevenLabs has no standalone text-translation endpoint — `--translation-engine {anthropic,openai,local}` must be passed explicitly alongside it. `--dub` synthesises the translated segments with the resolved TTS provider, fits them to their timing slots, and muxes them over the source video with ffmpeg (rejected if the resolved TTS engine is unusable, e.g. `local`). `--managed` bypasses this repo's pipeline entirely and calls the ElevenLabs Dubbing job API (create/poll/download) instead.
 
 Note: the original README advertised burned-in per-frame subtitles. That was never implemented and has been removed from the README — `.srt`, and with `--dub`/`--managed` a dubbed video, are the only output paths.
 
@@ -29,6 +29,9 @@ movie_subtitles/
     local.py          # Transcribe (faster-whisper) + Translate (MADLAD400 T5)
     elevenlabs.py      # ScribeTranscribe (ASR) + Speak (TTS); shared build_client()
     llm.py             # LLMTranslate: Claude-backed TranslationProvider
+    openai_.py          # OpenAITranscribe (ASR) + OpenAITranslate + OpenAISpeak (TTS);
+                         # shared build_client(); trailing underscore avoids shadowing
+                         # the `openai` SDK
 ```
 
 Flat package, no `src/` layout, no `tests/`.
@@ -49,8 +52,8 @@ CI (`.github/workflows/ci.yml`) runs those two ruff checks and nothing else — 
 
 - **Model/API wrappers are callable classes.** Load the model/client in `__init__`, expose a named method (`transcribe` / `translate` / `speak` / `dub`), and have `__call__` delegate to it. New backends follow the same shape.
 - **Orchestration lives only in `cli.py`.** Providers know nothing about each other, about SRT, or about dubbing.
-- **Providers implement Protocols (`providers/base.py`), not base classes.** `_build_asr_provider`/`_build_translation_provider` in `cli.py` are the only places that pick a concrete class per engine.
-- **Lazy, in-function provider imports.** Vendor SDK imports (`faster_whisper`, `transformers`, `elevenlabs`, `anthropic`) happen inside the functions that build each provider, not at module top level — this is what lets `--engine local` run without importing ElevenLabs/Anthropic SDKs, and vice versa.
+- **Providers implement Protocols (`providers/base.py`), not base classes.** `_build_asr_provider`/`_build_translation_provider`/`_build_tts_provider` in `cli.py` are the only places that pick a concrete class per engine; `_build_providers()` wraps the first two for the stages every invocation needs.
+- **Lazy, in-function provider imports.** Vendor SDK imports (`faster_whisper`, `transformers`, `elevenlabs`, `anthropic`, `openai`) happen inside the functions that build each provider, not at module top level — this is what lets `--engine local` run without importing ElevenLabs/Anthropic/OpenAI SDKs, and vice versa.
 - **Defaults are duplicated** between class `__init__` signatures and argparse. Change both together.
 - **Do not reorder `create_subtitles()` parameters** — `main()` passes the first five positionally. New params are keyword-only, appended at the end.
 - **Do not materialize `segments` into a list.** ASR providers return a lazy generator/iterable; the loop is what drives inference and the progress bar.
@@ -64,4 +67,4 @@ CI (`.github/workflows/ci.yml`) runs those two ruff checks and nothing else — 
 
 ## Things that don't exist yet
 
-No tests, no test framework, no config file or env-var layer beyond `ELEVENLABS_API_KEY`/`ANTHROPIC_API_KEY`. There is now a minimal error-handling layer at the `main()` boundary (`RuntimeError | ValueError | FileNotFoundError | TimeoutError | subprocess.CalledProcessError` caught and turned into a one-line message + `SystemExit(1)`); anything else still propagates as a traceback. If asked to add tests, that means introducing pytest and a `tests/` directory from scratch — don't go looking for existing ones.
+No tests, no test framework, no config file or env-var layer beyond `ELEVENLABS_API_KEY`/`ANTHROPIC_API_KEY`/`OPENAI_API_KEY` (see `.env.example` at the repo root, which holds placeholders for all three). There is now a minimal error-handling layer at the `main()` boundary (`RuntimeError | ValueError | FileNotFoundError | TimeoutError | subprocess.CalledProcessError` caught and turned into a one-line message + `SystemExit(1)`); anything else still propagates as a traceback. If asked to add tests, that means introducing pytest and a `tests/` directory from scratch — don't go looking for existing ones.

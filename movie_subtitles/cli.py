@@ -78,10 +78,13 @@ def _build_providers(
 ) -> tuple[ASRProvider, TranslationProvider]:
     """Build the ASR + translation providers, per-stage overridable.
 
-    `asr_engine`/`translation_engine` each independently pick a backend (e.g. Scribe ASR
-    with the local MADLAD400 translator), per Goal 1 of specs/elevenlabs-port.md ("--engine
-    {local,elevenlabs}, per-stage overridable"). `--engine` in the CLI is only a shorthand
-    that sets both when the per-stage flags are not given.
+    `asr_engine`/`translation_engine` each independently pick a backend by vendor name
+    (`local`, `elevenlabs`, `openai` for ASR; `local`, `anthropic`, `openai` for
+    translation) — e.g. Scribe ASR with the local MADLAD400 translator. `--engine` in the
+    CLI is only a shorthand that sets `asr_engine`/`translation_engine`/`tts_engine` when
+    the per-stage flags are not given; `_build_tts_provider` builds the TTS provider
+    separately (see `_dub_and_mux`), since this function only covers the two stages every
+    invocation needs.
     """
     return (
         _build_asr_provider(asr_engine, whisper_model_name),
