@@ -14,16 +14,20 @@ _MIN_RATE = 0.9
 _MAX_RATE = 1.15
 
 
+def _ideal_rate(actual_duration: float, slot_duration: float) -> float:
+    """The unclamped rate that would make `actual_duration` fill `slot_duration` exactly."""
+    if slot_duration <= 0 or actual_duration <= 0:
+        return 1.0
+
+    return actual_duration / slot_duration
+
+
 def fit_rate(actual_duration: float, slot_duration: float) -> float:
     """Compute the speaking rate needed to fit `actual_duration` into `slot_duration`.
 
     Returns the rate clamped to [_MIN_RATE, _MAX_RATE].
     """
-    if slot_duration <= 0 or actual_duration <= 0:
-        return 1.0
-
-    ideal_rate = actual_duration / slot_duration
-    return min(max(ideal_rate, _MIN_RATE), _MAX_RATE)
+    return min(max(_ideal_rate(actual_duration, slot_duration), _MIN_RATE), _MAX_RATE)
 
 
 def _probe_duration(fpath: Path) -> float:
@@ -65,19 +69,20 @@ def _synthesise_fitted(
     duration = _probe_duration(clip_path)
 
     rate = fit_rate(duration, slot_duration)
-    ideal_rate = duration / slot_duration if slot_duration > 0 else 1.0
-    if rate != ideal_rate:
-        direction = "speed up" if ideal_rate > 1.0 else "slow down"
-        logger.warning(
-            f"Segment {segment_id} would need to {direction} to rate {ideal_rate:.2f}x to "
-            f"exactly fit its slot, clamped to {rate:.2f}x ({duration:.2f}s audio vs "
-            f"{slot_duration:.2f}s slot)."
-        )
+    ideal = _ideal_rate(duration, slot_duration)
+    # A clamped rate is always 0.9 or 1.15, so it can never round to 1.00: every clamped
+    # segment goes through this branch and is reported once, at warning level.
     if round(rate, 2) != 1.0:
-        if rate > 1.0:
-            logger.info(f"Segment {segment_id} overruns its slot; speeding up to {rate:.2f}x.")
+        drift = "overruns" if rate > 1.0 else "underruns"
+        if rate != ideal:
+            logger.warning(
+                f"Segment {segment_id} {drift} its slot and would need rate {ideal:.2f}x to "
+                f"fit exactly; clamped to {rate:.2f}x ({duration:.2f}s audio vs "
+                f"{slot_duration:.2f}s slot)."
+            )
         else:
-            logger.info(f"Segment {segment_id} underruns its slot; slowing down to {rate:.2f}x.")
+            adjustment = "speeding up" if rate > 1.0 else "slowing down"
+            logger.info(f"Segment {segment_id} {drift} its slot; {adjustment} to {rate:.2f}x.")
         tts(text, clip_path, speed=rate)
         duration = _probe_duration(clip_path)
 
