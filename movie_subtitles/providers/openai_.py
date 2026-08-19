@@ -1,25 +1,27 @@
 import logging
 import os
 from collections.abc import Iterable
+from functools import lru_cache
 from pathlib import Path
 
 from openai import OpenAI
 
 from movie_subtitles.providers.base import Segment
+from movie_subtitles.providers.prompt import SYSTEM_PROMPT, build_prompt
 
 logger = logging.getLogger("openai_provider")
 
 _MIN_SPEED = 0.25
 _MAX_SPEED = 4.0
 
-_SYSTEM_PROMPT = (
-    "You are a subtitle translator. Translate the given text into the requested "
-    "language. Respond with only the translation, no preamble, no explanation, "
-    "no quotation marks."
-)
 
-
+@lru_cache(maxsize=1)
 def build_client() -> OpenAI:
+    """Build the OpenAI client, memoised.
+
+    --engine openai --dub constructs three providers (ASR, translation, TTS); sharing
+    one client keeps them on a single connection pool instead of three.
+    """
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError(
@@ -73,6 +75,8 @@ class OpenAITranscribe:
         return self._yield_segments(segments)
 
     def _yield_segments(self, segments: Iterable) -> Iterable[Segment]:
+        # Split out from transcribe() so the missing-segments check above runs when
+        # transcribe() is called, not when the first segment is pulled. Do not re-merge.
         for segment_id, segment in enumerate(segments):
             text = getattr(segment, "text", "").strip()
             if not text:
@@ -94,18 +98,12 @@ class OpenAITranslate:
         return self.translate(text, output_lang, budget_chars)
 
     def translate(self, text: str, output_lang: str, budget_chars: int | None = None) -> str:
-        prompt = f"Translate the following text into '{output_lang}':\n\n{text}"
-        if budget_chars is not None:
-            prompt += (
-                f"\n\nThe translation must fit within roughly {budget_chars} characters. "
-                "Stay as faithful as possible to the meaning while shortening phrasing, "
-                "dropping filler, or rewording as needed to hit that budget."
-            )
+        prompt = build_prompt(text, output_lang, budget_chars)
 
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
             max_tokens=1024,

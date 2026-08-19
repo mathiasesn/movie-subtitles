@@ -57,7 +57,9 @@ def _build_translation_provider(translation_engine: str, mt_model_name: str) -> 
         raise ValueError(f"Unknown translation engine: {translation_engine}")
 
 
-_VALID_TTS_ENGINES = {"elevenlabs", "openai"}
+# Single source of truth: argparse choices, the --dub guard, and its error
+# message all derive from this, so adding a backend is one edit.
+TTS_ENGINES = ("elevenlabs", "openai")
 
 
 def _build_tts_provider(tts_engine: str) -> TTSProvider:
@@ -71,25 +73,6 @@ def _build_tts_provider(tts_engine: str) -> TTSProvider:
         return OpenAISpeak()
     else:
         raise ValueError(f"Unknown TTS engine: {tts_engine}")
-
-
-def _build_providers(
-    asr_engine: str, translation_engine: str, whisper_model_name: str, mt_model_name: str
-) -> tuple[ASRProvider, TranslationProvider]:
-    """Build the ASR + translation providers, per-stage overridable.
-
-    `asr_engine`/`translation_engine` each independently pick a backend by vendor name
-    (`local`, `elevenlabs`, `openai` for ASR; `local`, `anthropic`, `openai` for
-    translation) — e.g. Scribe ASR with the local MADLAD400 translator. `--engine` in the
-    CLI is only a shorthand that sets `asr_engine`/`translation_engine`/`tts_engine` when
-    the per-stage flags are not given; `_build_tts_provider` builds the TTS provider
-    separately (see `_dub_and_mux`), since this function only covers the two stages every
-    invocation needs.
-    """
-    return (
-        _build_asr_provider(asr_engine, whisper_model_name),
-        _build_translation_provider(translation_engine, mt_model_name),
-    )
 
 
 def create_subtitles(
@@ -137,10 +120,10 @@ def create_subtitles(
             "--translation-engine anthropic (or --engine elevenlabs/openai) with --dub."
         )
 
-    if dub and resolved_tts_engine not in _VALID_TTS_ENGINES:
+    if dub and resolved_tts_engine not in TTS_ENGINES:
         raise ValueError(
             f"--dub requires a usable TTS engine, but it resolved to '{resolved_tts_engine}'. "
-            "Pass --tts-engine {elevenlabs,openai} explicitly."
+            f"Pass --tts-engine {{{','.join(TTS_ENGINES)}}} explicitly."
         )
 
     if managed:
@@ -149,9 +132,16 @@ def create_subtitles(
 
     srt_file = fpath.with_suffix(".srt")
 
-    transcriber, translator = _build_providers(
-        resolved_asr_engine, resolved_translation_engine, whisper_model_name, mt_model_name
-    )
+    # Build cheap-to-construct providers first so a missing API key or a missing ffmpeg
+    # fails in milliseconds, rather than after the ASR model download and a full run of
+    # paid per-segment translation calls.
+    translator = _build_translation_provider(resolved_translation_engine, mt_model_name)
+    tts = None
+    if dub:
+        _check_ffmpeg_tools()
+        tts = _build_tts_provider(resolved_tts_engine)
+
+    transcriber = _build_asr_provider(resolved_asr_engine, whisper_model_name)
     segments = transcriber(fpath, audio_lang)
 
     srt_lines = []
@@ -174,8 +164,8 @@ def create_subtitles(
     srt_file.write_text("".join(srt_lines), encoding="utf-8")
     logger.info(f"Saved srt file to {srt_file}")
 
-    if dub:
-        _dub_and_mux(fpath, dub_segments, dub_translations, resolved_tts_engine)
+    if tts is not None:
+        _dub_and_mux(fpath, dub_segments, dub_translations, tts)
 
 
 def _run_managed(fpath: Path, audio_lang: str, srt_lang: str) -> None:
@@ -206,15 +196,12 @@ def _dub_and_mux(
     fpath: Path,
     segments: list[Segment],
     translations: dict[int, str],
-    tts_engine: str,
+    tts: TTSProvider,
 ) -> None:
     from movie_subtitles.dub import synthesise_track
     from movie_subtitles.mux import mux_dub
 
-    _check_ffmpeg_tools()
-
     audio_track = fpath.with_name(f"{fpath.stem}.dub_audio.mp3")
-    tts = _build_tts_provider(tts_engine)
 
     synthesise_track(segments, translations, tts, audio_track)
 
@@ -286,7 +273,7 @@ def main() -> None:
     parser.add_argument(
         "--tts-engine",
         type=str,
-        choices=["elevenlabs", "openai"],
+        choices=list(TTS_ENGINES),
         default=None,
         help="Override --engine for the TTS (dubbing) stage only",
     )
