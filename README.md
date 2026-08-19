@@ -1,7 +1,8 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/logo/logo-dark.svg">
-    <img src="assets/logo/logo.svg" alt="Movie subtitles" width="420">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/mathiasesn/movie-subtitles/main/assets/logo/logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/mathiasesn/movie-subtitles/main/assets/logo/logo.svg">
+    <img src="https://raw.githubusercontent.com/mathiasesn/movie-subtitles/main/assets/logo/logo.png" alt="Movie subtitles" width="420">
   </picture>
 </p>
 
@@ -10,7 +11,7 @@
   <a href="https://github.com/mathiasesn/movie-subtitles/actions/workflows/publish.yml"><img src="https://github.com/mathiasesn/movie-subtitles/actions/workflows/publish.yml/badge.svg" alt="Publish"></a>
   <a href="https://pypi.org/project/movie-subtitles/"><img src="https://img.shields.io/pypi/v/movie-subtitles.svg" alt="PyPI"></a>
   <a href="https://pypi.org/project/movie-subtitles/"><img src="https://img.shields.io/pypi/pyversions/movie-subtitles.svg" alt="Python versions"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="https://github.com/mathiasesn/movie-subtitles/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff"></a>
 </p>
 
