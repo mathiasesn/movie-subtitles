@@ -64,11 +64,18 @@ def _synthesise_fitted(
 ) -> tuple[Path, bool]:
     """Synthesise `text`, re-synthesising at an adjusted rate if it over- or underruns.
 
-    Returns (clip_path, still_overruns) where `still_overruns` is True if the segment's
-    actual, re-measured duration still overruns the slot after the clamped-rate
-    re-synthesis (not merely whether the ideal rate fell outside the clamp -- the clamped
-    rate is an approximation and re-synthesis can still land long of the slot). An
-    underrun never counts here: it just leaves trailing silence in the slot.
+    Returns (clip_path, still_overruns). For the ordinary case, `still_overruns` is True
+    if the segment's actual, re-measured duration still overruns the slot after the
+    clamped-rate re-synthesis (not merely whether the ideal rate fell outside the clamp --
+    the clamped rate is an approximation and re-synthesis can still land long of the
+    slot). An underrun never counts here: it just leaves trailing silence in the slot.
+
+    Two cases skip that re-synthesis and re-measurement entirely, returning True without
+    ever attempting a clamped-rate fit: a non-positive slot duration, and an ideal rate
+    beyond `_HOPELESS_RATE` where a +-15% clamped nudge would be noise against the
+    mismatch. In both, the clip is placed unfitted at 1.0x and `still_overruns` is True by
+    construction (an overrun into the slot's silence is the whole reason it is hopeless),
+    not because an overrun was measured.
     """
     clip_path = out_dir / f"segment_{segment_id:05d}.mp3"
     tts(text, clip_path, speed=1.0)
@@ -164,7 +171,7 @@ def synthesise_track(
             overrun_count += 1
         inputs.append((segment.start, clip_path))
 
-    logger.info(f"{overrun_count} segment(s) still overrun their slot after the rate clamp")
+    logger.info(f"{overrun_count} segment(s) still overrun their slot after fitting")
 
     _assemble_timeline(inputs, out_path)
     return out_path
