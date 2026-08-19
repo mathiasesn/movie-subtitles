@@ -13,6 +13,7 @@ dependencies = [
     "torch",
     "elevenlabs",
     "anthropic",
+    "openai",
 ]
 
 [project.urls]
