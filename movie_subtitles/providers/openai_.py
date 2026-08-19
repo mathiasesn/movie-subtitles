@@ -90,7 +90,17 @@ class OpenAITranscribe:
 
 
 class OpenAITranslate:
-    def __init__(self, model: str = "gpt-4o") -> None:
+    """TranslationProvider backed by the OpenAI chat completions endpoint.
+
+    Default model is "gpt-5.6-terra", the balanced tier of the current GPT-5.6
+    family. GPT-5 series models are reasoning models on this endpoint: they take
+    `max_completion_tokens` rather than `max_tokens`, and reject `temperature`.
+    `reasoning_effort="none"` keeps a per-segment translation call fast and cheap --
+    there is nothing to deliberate over here, and reasoning tokens would otherwise
+    eat into the completion budget.
+    """
+
+    def __init__(self, model: str = "gpt-5.6-terra") -> None:
         self.model = model
         self.client = build_client()
 
@@ -106,7 +116,8 @@ class OpenAITranslate:
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=1024,
+            max_completion_tokens=1024,
+            reasoning_effort="none",
         )
 
         translation = response.choices[0].message.content or ""

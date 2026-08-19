@@ -32,7 +32,7 @@ def build_client() -> ElevenLabs:
 class ScribeTranscribe:
     def __init__(
         self,
-        model_id: str = "scribe_v1",
+        model_id: str = "scribe_v2",
         max_segment_seconds: float = 7.0,
         max_segment_chars: int = 100,
     ) -> None:

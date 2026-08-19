@@ -299,7 +299,7 @@ Anthropic:
 
 - **ASR**: `whisper-1` (`movie_subtitles/providers/openai_.py:OpenAITranscribe`),
   normalised into the same `Segment` shape faster-whisper and Scribe produce.
-- **Translation**: OpenAI chat completions
+- **Translation**: OpenAI chat completions (`gpt-5.6-terra`)
   (`movie_subtitles/providers/openai_.py:OpenAITranslate`), honouring the same
   `budget_chars` length-budget contract as `LLMTranslate` (Claude), so `--dub` is
   permitted with `--translation-engine openai`.
