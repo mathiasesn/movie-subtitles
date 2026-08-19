@@ -7,7 +7,7 @@ from openai import OpenAI
 
 from movie_subtitles.providers.base import Segment
 
-logger = logging.getLogger("openai")
+logger = logging.getLogger("openai_provider")
 
 _MIN_SPEED = 0.25
 _MAX_SPEED = 4.0
@@ -33,13 +33,15 @@ def build_client() -> OpenAI:
 class OpenAITranscribe:
     """ASRProvider backed by the OpenAI audio transcriptions endpoint.
 
-    Default model is "gpt-4o-transcribe". Note: gpt-4o-transcribe may not support
-    verbose_json/segment timestamps on all accounts -- "whisper-1" is the documented
-    fallback model for segment-level timestamps, so the model is an __init__ param the
-    caller can override.
+    Default model is "whisper-1" -- the documented, reliable model for
+    verbose_json responses with segment-level timestamps, which this provider
+    requires. "gpt-4o-transcribe" is newer, but its support for
+    response_format="verbose_json" / timestamp_granularities=["segment"] is not
+    guaranteed across accounts, so it is not the default; the model remains an
+    __init__ param the caller can override.
     """
 
-    def __init__(self, model: str = "gpt-4o-transcribe") -> None:
+    def __init__(self, model: str = "whisper-1") -> None:
         self.model = model
         self.client = build_client()
 
@@ -60,7 +62,14 @@ class OpenAITranscribe:
                 language=audio_lang,
             )
 
-        segments = getattr(response, "segments", None) or ()
+        segments = getattr(response, "segments", None)
+        if not segments:
+            raise RuntimeError(
+                f"OpenAI transcription response from model '{self.model}' has no "
+                "'segments' field. This model may not support segment timestamps "
+                "(response_format='verbose_json', timestamp_granularities=['segment']); "
+                "try model='whisper-1' instead."
+            )
         return self._yield_segments(segments)
 
     def _yield_segments(self, segments: Iterable) -> Iterable[Segment]:
@@ -99,6 +108,7 @@ class OpenAITranslate:
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
+            max_tokens=1024,
         )
 
         translation = response.choices[0].message.content or ""
