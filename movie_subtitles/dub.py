@@ -36,6 +36,15 @@ def fit_rate(actual_duration: float, slot_duration: float) -> float:
     return min(max(_ideal_rate(actual_duration, slot_duration), _MIN_RATE), _MAX_RATE)
 
 
+def _mismatch(duration: float, slot_duration: float) -> str:
+    """The "Xs audio vs Ys slot" fragment shared by every fitting log message.
+
+    Four call sites quoted these two numbers with the same precision by hand; keeping the
+    wording and the format spec in one place stops them drifting apart.
+    """
+    return f"{duration:.2f}s audio vs {slot_duration:.2f}s slot"
+
+
 def _probe_duration(fpath: Path) -> float:
     result = subprocess.run(
         [
@@ -92,24 +101,22 @@ def _synthesise_fitted(
     # overrun into the following silence.
     if slot_duration <= 0 or ideal > _HOPELESS_RATE:
         logger.warning(
-            f"Segment {segment_id} ({duration:.2f}s audio vs {slot_duration:.2f}s slot) is "
-            "hopelessly mismatched; leaving it unfitted at 1.0x and letting it overrun into "
-            "the following silence by design."
+            f"Segment {segment_id} ({_mismatch(duration, slot_duration)}) is hopelessly "
+            "mismatched; leaving it unfitted at 1.0x and letting it overrun into the "
+            "following silence by design."
         )
         return clip_path, True
 
     rate = fit_rate(duration, slot_duration)
-    clamped = False
     # A clamped rate is always 0.9 or 1.15, so it can never round to 1.00: every clamped
     # segment goes through this branch and is reported once, at warning level.
-    if round(rate, 2) != 1.0:
-        clamped = True
+    clamped = round(rate, 2) != 1.0
+    if clamped:
         drift = "overruns" if rate > 1.0 else "underruns"
         if rate != ideal:
             logger.warning(
                 f"Segment {segment_id} {drift} its slot and would need rate {ideal:.2f}x to "
-                f"fit exactly; clamped to {rate:.2f}x ({duration:.2f}s audio vs "
-                f"{slot_duration:.2f}s slot)."
+                f"fit exactly; clamped to {rate:.2f}x ({_mismatch(duration, slot_duration)})."
             )
         else:
             adjustment = "speeding up" if rate > 1.0 else "slowing down"
@@ -123,18 +130,18 @@ def _synthesise_fitted(
     still_overruns = duration > slot_duration
 
     if still_overruns:
-        if clamped:
-            logger.warning(
-                f"Segment {segment_id} does not fit its slot even at the {rate:.2f}x rate "
-                f"clamp ({duration:.2f}s audio vs {slot_duration:.2f}s slot); letting it "
-                "overrun into the following silence."
-            )
-        else:
-            logger.warning(
-                f"Segment {segment_id} does not fit its slot at the natural 1.0x rate; no "
-                f"clamp was applied ({duration:.2f}s audio vs {slot_duration:.2f}s slot); "
-                "letting it overrun into the following silence."
-            )
+        # Name the clamp only when one was actually applied: a rate that rounded to 1.00
+        # skipped the re-synthesis, so no clamp is to blame for the clip still being long.
+        attempt = (
+            f"even at the {rate:.2f}x rate clamp"
+            if clamped
+            else "at the natural 1.0x rate, and no clamp was applied"
+        )
+        logger.warning(
+            f"Segment {segment_id} does not fit its slot {attempt} "
+            f"({_mismatch(duration, slot_duration)}); letting it overrun into the "
+            "following silence."
+        )
 
     return clip_path, still_overruns
 
