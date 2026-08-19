@@ -19,7 +19,7 @@ def _build_client() -> anthropic.Anthropic:
     if not api_key:
         raise RuntimeError(
             "ANTHROPIC_API_KEY environment variable is not set. "
-            "Set it to your Anthropic API key to use the 'elevenlabs' engine."
+            "Set it to your Anthropic API key to use the 'anthropic' translation engine."
         )
 
     return anthropic.Anthropic(api_key=api_key)

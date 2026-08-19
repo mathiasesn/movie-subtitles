@@ -6,7 +6,7 @@ from pathlib import Path
 
 from tqdm.auto import tqdm
 
-from movie_subtitles.providers.base import ASRProvider, Segment, TranslationProvider
+from movie_subtitles.providers.base import ASRProvider, Segment, TranslationProvider, TTSProvider
 from movie_subtitles.srt import format_block
 
 logger = logging.getLogger("cli")
@@ -32,6 +32,10 @@ def _build_asr_provider(asr_engine: str, whisper_model_name: str) -> ASRProvider
         from movie_subtitles.providers.elevenlabs import ScribeTranscribe
 
         return ScribeTranscribe()
+    elif asr_engine == "openai":
+        from movie_subtitles.providers.openai_ import OpenAITranscribe
+
+        return OpenAITranscribe()
     else:
         raise ValueError(f"Unknown ASR engine: {asr_engine}")
 
@@ -41,12 +45,29 @@ def _build_translation_provider(translation_engine: str, mt_model_name: str) -> 
         from movie_subtitles.providers.local import Translate
 
         return Translate(mt_model_name)
-    elif translation_engine == "elevenlabs":
+    elif translation_engine == "anthropic":
         from movie_subtitles.providers.llm import LLMTranslate
 
         return LLMTranslate()
+    elif translation_engine == "openai":
+        from movie_subtitles.providers.openai_ import OpenAITranslate
+
+        return OpenAITranslate()
     else:
         raise ValueError(f"Unknown translation engine: {translation_engine}")
+
+
+def _build_tts_provider(tts_engine: str) -> TTSProvider:
+    if tts_engine == "elevenlabs":
+        from movie_subtitles.providers.elevenlabs import Speak
+
+        return Speak()
+    elif tts_engine == "openai":
+        from movie_subtitles.providers.openai_ import OpenAISpeak
+
+        return OpenAISpeak()
+    else:
+        raise ValueError(f"Unknown TTS engine: {tts_engine}")
 
 
 def _build_providers(
@@ -77,14 +98,16 @@ def create_subtitles(
     translation_engine: str | None = None,
     dub: bool = False,
     managed: bool = False,
+    tts_engine: str | None = None,
 ) -> None:
     if isinstance(fpath, str):
         fpath = Path(fpath)
 
-    # --engine is the shorthand that sets both stages; --asr-engine/--translation-engine
-    # override it per stage (Goal 1 of specs/elevenlabs-port.md).
+    # --engine is the shorthand that sets all stages; --asr-engine/--translation-engine/
+    # --tts-engine override it per stage (Goal 2 of specs/openai-api-key-support.md).
     resolved_asr_engine = asr_engine if asr_engine is not None else engine
     resolved_translation_engine = translation_engine if translation_engine is not None else engine
+    resolved_tts_engine = tts_engine if tts_engine is not None else engine
 
     if managed and dub:
         raise ValueError(
@@ -92,12 +115,20 @@ def create_subtitles(
             "Dubbing job end to end instead of the local transcribe/translate/dub pipeline."
         )
 
+    if not managed and translation_engine is None and engine == "elevenlabs":
+        raise ValueError(
+            "--engine elevenlabs does not set a translation stage: ElevenLabs has no "
+            "standalone text-translation endpoint (translation exists only bundled "
+            "inside the Dubbing job, see --managed). Pass --translation-engine "
+            "{anthropic,openai,local} explicitly."
+        )
+
     if dub and resolved_translation_engine == "local":
         raise ValueError(
             "--dub requires a length-budgeted translator: the local MADLAD400 translator "
             "ignores budget_chars, so timing-drift fitting (step 1 of the drift strategy) "
             "is a silent no-op and the dub would be worse for no stated reason. Use "
-            "--translation-engine elevenlabs (or --engine elevenlabs) with --dub."
+            "--translation-engine anthropic (or --engine elevenlabs/openai) with --dub."
         )
 
     if managed:
@@ -132,7 +163,7 @@ def create_subtitles(
     logger.info(f"Saved srt file to {srt_file}")
 
     if dub:
-        _dub_and_mux(fpath, dub_segments, dub_translations)
+        _dub_and_mux(fpath, dub_segments, dub_translations, resolved_tts_engine)
 
 
 def _run_managed(fpath: Path, audio_lang: str, srt_lang: str) -> None:
@@ -163,15 +194,15 @@ def _dub_and_mux(
     fpath: Path,
     segments: list[Segment],
     translations: dict[int, str],
+    tts_engine: str,
 ) -> None:
     from movie_subtitles.dub import synthesise_track
     from movie_subtitles.mux import mux_dub
-    from movie_subtitles.providers.elevenlabs import Speak
 
     _check_ffmpeg_tools()
 
     audio_track = fpath.with_name(f"{fpath.stem}.dub_audio.mp3")
-    tts = Speak()
+    tts = _build_tts_provider(tts_engine)
 
     synthesise_track(segments, translations, tts, audio_track)
 
@@ -217,32 +248,42 @@ def main() -> None:
     parser.add_argument(
         "--engine",
         type=str,
-        choices=["local", "elevenlabs"],
+        choices=["local", "elevenlabs", "openai"],
         default="local",
-        help="The provider engine to use for transcription and translation (shorthand for "
-        "--asr-engine and --translation-engine when those are not set)",
+        help="The provider engine to use for transcription, translation and TTS "
+        "(shorthand for --asr-engine, --translation-engine and --tts-engine when those "
+        "are not set). --engine elevenlabs requires --translation-engine to be set "
+        "explicitly, since ElevenLabs has no standalone translation endpoint",
     )
     parser.add_argument(
         "--asr-engine",
         type=str,
-        choices=["local", "elevenlabs"],
+        choices=["local", "elevenlabs", "openai"],
         default=None,
         help="Override --engine for the ASR (transcription) stage only",
     )
     parser.add_argument(
         "--translation-engine",
         type=str,
-        choices=["local", "elevenlabs"],
+        choices=["local", "anthropic", "openai"],
         default=None,
         help="Override --engine for the translation stage only. --dub requires this to "
-        "resolve to 'elevenlabs', since the local translator ignores the length budget",
+        "resolve to 'anthropic' or 'openai', since the local translator ignores the "
+        "length budget",
+    )
+    parser.add_argument(
+        "--tts-engine",
+        type=str,
+        choices=["elevenlabs", "openai"],
+        default=None,
+        help="Override --engine for the TTS (dubbing) stage only",
     )
     parser.add_argument(
         "--dub",
         action="store_true",
         help=(
-            "Synthesise the translated segments with ElevenLabs TTS and mux them over "
-            "the source video (requires ffmpeg and ELEVENLABS_API_KEY)"
+            "Synthesise the translated segments with TTS and mux them over the source "
+            "video (requires ffmpeg and the API key for the resolved TTS engine)"
         ),
     )
     parser.add_argument(
@@ -268,6 +309,7 @@ def main() -> None:
             translation_engine=args.translation_engine,
             dub=args.dub,
             managed=args.managed,
+            tts_engine=args.tts_engine,
         )
     except (
         RuntimeError,
