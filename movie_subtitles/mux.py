@@ -10,7 +10,10 @@ def mux_dub(video_path: Path, audio_path: Path) -> Path:
     """Overlay `audio_path` onto `video_path`'s video track via ffmpeg.
 
     Writes `<video>.dubbed<ext>` next to `video_path` and returns that path. The
-    original video's audio track is dropped; the synthesised track replaces it.
+    original video's audio track is dropped; the synthesised track replaces it. The
+    video's full duration is authoritative -- no `-shortest`, so a synthesised track that
+    ends before the video does (e.g. no speech in the video's tail) does not truncate the
+    video; ffmpeg pads the shorter audio stream with silence to the video's length.
     """
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg is not on PATH. Install ffmpeg to use --dub.")
@@ -32,7 +35,6 @@ def mux_dub(video_path: Path, audio_path: Path) -> Path:
         "copy",
         "-c:a",
         "aac",
-        "-shortest",
         str(out_path),
     ]
 

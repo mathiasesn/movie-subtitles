@@ -85,7 +85,16 @@ class ManagedDub:
             time.sleep(self.poll_interval)
 
     def _download(self, fpath: Path, dubbing_id: str, target_lang: str) -> Path:
-        out_path = fpath.with_name(f"{fpath.stem}.dubbed{fpath.suffix}")
+        # dubbing.audio.get's own docstring in the installed SDK
+        # (.venv/lib/python3.12/site-packages/elevenlabs/dubbing/audio/client.py) reads:
+        # "Returns dub as a streamed MP3 or MP4 file." -- confirmed the same wording against
+        # https://elevenlabs.io/docs/api-reference/dubbing/audio/get.md (2026-08-19). For a
+        # video source (this CLI's only input type), the endpoint renders an MP4 container,
+        # not audio-only bytes, and not necessarily whatever container the source video used
+        # (.mov/.mkv/etc). Writing those bytes under `fpath.suffix` mislabels the file
+        # whenever the source wasn't already .mp4. Always write `.mp4` so the extension
+        # matches the actual container returned.
+        out_path = fpath.with_name(f"{fpath.stem}.dubbed.mp4")
 
         logger.info(f"Downloading dubbed audio for {dubbing_id} ({target_lang}) -> {out_path}")
         chunks = self.client.dubbing.audio.get(dubbing_id, target_lang)

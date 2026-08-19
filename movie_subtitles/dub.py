@@ -58,8 +58,10 @@ def _synthesise_fitted(
 ) -> tuple[Path, bool]:
     """Synthesise `text`, re-synthesising at an adjusted rate if it does not fit.
 
-    Returns (clip_path, unfittable) where `unfittable` is True if the segment still
-    did not fit the slot at the clamp bound.
+    Returns (clip_path, unfittable) where `unfittable` is True if the segment's actual,
+    re-measured duration still does not fit the slot after the clamped-rate re-synthesis
+    (not merely whether the ideal rate fell outside the clamp -- the clamped rate is an
+    approximation and re-synthesis can still land short or long of the slot).
     """
     clip_path = out_dir / f"segment_{segment_id:05d}.mp3"
     tts(text, clip_path, speed=1.0)
@@ -68,10 +70,15 @@ def _synthesise_fitted(
     if duration <= slot_duration:
         return clip_path, False
 
-    rate, unfittable = fit_rate(duration, slot_duration)
+    rate, _ = fit_rate(duration, slot_duration)
     if rate != 1.0:
         tts(text, clip_path, speed=rate)
         duration = _probe_duration(clip_path)
+
+    # Re-measure the clip that will actually be placed on the timeline: the fit is
+    # judged by whether it actually fits its slot now, not by whether the ideal rate was
+    # inside the clamp.
+    unfittable = duration > slot_duration
 
     if unfittable:
         logger.warning(

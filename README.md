@@ -15,6 +15,17 @@ There is also `--managed`, which bypasses this repo's pipeline entirely and call
 ElevenLabs Dubbing job API (create → poll → download) as the "buy" side of a build-vs-buy
 comparison.
 
+`--engine` is a shorthand that sets both stages at once. Each stage can be overridden
+independently with `--asr-engine` and `--translation-engine` — e.g. Scribe ASR with the
+local MADLAD400 translator (`--asr-engine elevenlabs --translation-engine local`). Not
+every combination makes sense: `--dub` requires a length-budgeted translator, so
+`--translation-engine local` (or `--engine local`) combined with `--dub` is rejected —
+see [Timing drift](#timing-drift).
+
+**`--dub` replaces the original audio track, it does not mix with it.** `mux.py` maps
+only the synthesised track (`-map 1:a:0`) onto the source video (`-map 0:v:0`); the
+original spoken audio is dropped entirely, not layered under the dub.
+
 ## Prerequisites
 
 - Python >= 3.10
@@ -76,7 +87,7 @@ first model download.
 ## Usage
 
 ```shell
-$ movie-subtitles --help
+$ uv run movie-subtitles --help
 usage: translation-cli <command> [<args>]
 
 options:
@@ -90,7 +101,15 @@ options:
   --mt-model MT_MODEL   The machine translation model to use
   --engine {local,elevenlabs}
                         The provider engine to use for transcription and
-                        translation
+                        translation (shorthand for --asr-engine and
+                        --translation-engine when those are not set)
+  --asr-engine {local,elevenlabs}
+                        Override --engine for the ASR (transcription) stage
+                        only
+  --translation-engine {local,elevenlabs}
+                        Override --engine for the translation stage only.
+                        --dub requires this to resolve to 'elevenlabs', since
+                        the local translator ignores the length budget
   --dub                 Synthesise the translated segments with ElevenLabs TTS
                         and mux them over the source video (requires ffmpeg
                         and ELEVENLABS_API_KEY)
@@ -98,6 +117,16 @@ options:
                         (create/poll/download) instead of the local
                         transcribe/translate/dub pipeline (requires
                         ELEVENLABS_API_KEY). Mutually exclusive with --dub.
+```
+
+`--engine local --dub` (or `--translation-engine local --dub`) is rejected up front with a
+`ValueError` explaining why, rather than silently shipping a worse dub:
+
+```shell
+$ uv run movie-subtitles --input clip.mp4 --engine local --dub
+[19/08/2026-14:21:12][ERROR][cli] --dub requires a length-budgeted translator: the local MADLAD400 translator ignores budget_chars, so timing-drift fitting (step 1 of the drift strategy) is a silent no-op and the dub would be worse for no stated reason. Use --translation-engine elevenlabs (or --engine elevenlabs) with --dub.
+$ echo $?
+1
 ```
 
 Local, offline, `.srt` only (unchanged from before this port):
@@ -281,6 +310,14 @@ movie-subtitles --input samples/en_clip.mp4 --engine elevenlabs --dub
 
 TBD — not yet run. Listen to `en_clip.dubbed.mp4` and note naturalness, pronunciation,
 and any audible rate-clamp artefacts once produced.
+
+### Translation budget adherence
+
+How closely `LLMTranslate` (Claude) actually respects the `budget_chars` target passed in
+the prompt (see [Timing drift](#timing-drift)) — e.g. the distribution of `len(actual) /
+budget_chars` across the test clip's segments.
+
+- English clip (~60s), en→da: **TBD — not yet run**
 
 ### Unfittable-segment count
 

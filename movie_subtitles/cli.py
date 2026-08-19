@@ -1,4 +1,6 @@
 import logging
+import shutil
+import subprocess
 from argparse import ArgumentParser
 from pathlib import Path
 
@@ -21,20 +23,46 @@ def _budget_chars(start: float, end: float) -> int:
     return max(int(duration * _CHARS_PER_SECOND), 1)
 
 
-def _build_providers(
-    engine: str, whisper_model_name: str, mt_model_name: str
-) -> tuple[ASRProvider, TranslationProvider]:
-    if engine == "local":
-        from movie_subtitles.providers.local import Transcribe, Translate
+def _build_asr_provider(asr_engine: str, whisper_model_name: str) -> ASRProvider:
+    if asr_engine == "local":
+        from movie_subtitles.providers.local import Transcribe
 
-        return Transcribe(whisper_model_name), Translate(mt_model_name)
-    elif engine == "elevenlabs":
+        return Transcribe(whisper_model_name)
+    elif asr_engine == "elevenlabs":
         from movie_subtitles.providers.elevenlabs import ScribeTranscribe
+
+        return ScribeTranscribe()
+    else:
+        raise ValueError(f"Unknown ASR engine: {asr_engine}")
+
+
+def _build_translation_provider(translation_engine: str, mt_model_name: str) -> TranslationProvider:
+    if translation_engine == "local":
+        from movie_subtitles.providers.local import Translate
+
+        return Translate(mt_model_name)
+    elif translation_engine == "elevenlabs":
         from movie_subtitles.providers.llm import LLMTranslate
 
-        return ScribeTranscribe(), LLMTranslate()
+        return LLMTranslate()
     else:
-        raise ValueError(f"Unknown engine: {engine}")
+        raise ValueError(f"Unknown translation engine: {translation_engine}")
+
+
+def _build_providers(
+    asr_engine: str, translation_engine: str, whisper_model_name: str, mt_model_name: str
+) -> tuple[ASRProvider, TranslationProvider]:
+    """Build the ASR + translation providers, per-stage overridable.
+
+    `asr_engine`/`translation_engine` each independently pick a backend (e.g. Scribe ASR
+    with the local MADLAD400 translator), per Goal 1 of specs/elevenlabs-port.md ("--engine
+    {local,elevenlabs}, per-stage overridable"). `--engine` in the CLI is only a shorthand
+    that sets both when the per-stage flags are not given.
+    """
+    return (
+        _build_asr_provider(asr_engine, whisper_model_name),
+        _build_translation_provider(translation_engine, mt_model_name),
+    )
 
 
 def create_subtitles(
@@ -45,16 +73,31 @@ def create_subtitles(
     mt_model_name: str = "jbochi/madlad400-3b-mt",
     *,
     engine: str = "local",
+    asr_engine: str | None = None,
+    translation_engine: str | None = None,
     dub: bool = False,
     managed: bool = False,
 ) -> None:
     if isinstance(fpath, str):
         fpath = Path(fpath)
 
+    # --engine is the shorthand that sets both stages; --asr-engine/--translation-engine
+    # override it per stage (Goal 1 of specs/elevenlabs-port.md).
+    resolved_asr_engine = asr_engine if asr_engine is not None else engine
+    resolved_translation_engine = translation_engine if translation_engine is not None else engine
+
     if managed and dub:
         raise ValueError(
             "--managed and --dub are mutually exclusive: --managed runs the ElevenLabs "
             "Dubbing job end to end instead of the local transcribe/translate/dub pipeline."
+        )
+
+    if dub and resolved_translation_engine == "local":
+        raise ValueError(
+            "--dub requires a length-budgeted translator: the local MADLAD400 translator "
+            "ignores budget_chars, so timing-drift fitting (step 1 of the drift strategy) "
+            "is a silent no-op and the dub would be worse for no stated reason. Use "
+            "--translation-engine elevenlabs (or --engine elevenlabs) with --dub."
         )
 
     if managed:
@@ -63,7 +106,9 @@ def create_subtitles(
 
     srt_file = fpath.with_suffix(".srt")
 
-    transcriber, translator = _build_providers(engine, whisper_model_name, mt_model_name)
+    transcriber, translator = _build_providers(
+        resolved_asr_engine, resolved_translation_engine, whisper_model_name, mt_model_name
+    )
     segments = transcriber(fpath, audio_lang)
 
     srt_lines = []
@@ -98,6 +143,22 @@ def _run_managed(fpath: Path, audio_lang: str, srt_lang: str) -> None:
     logger.info(f"Saved managed dub to {out_path}")
 
 
+def _check_ffmpeg_tools() -> None:
+    """Raise a clear RuntimeError if ffmpeg or ffprobe is missing, before any work starts.
+
+    dub.py uses ffprobe to measure synthesised clip duration and mux.py uses ffmpeg to
+    assemble/mux; a missing ffprobe used to crash with a raw FileNotFoundError from
+    subprocess deep inside dub.py. Checking both up front keeps the failure mode
+    consistent with mux.py's existing ffmpeg check.
+    """
+    missing = [name for name in ("ffmpeg", "ffprobe") if shutil.which(name) is None]
+    if missing:
+        raise RuntimeError(
+            f"{' and '.join(missing)} not on PATH. Install ffmpeg (which provides both "
+            "ffmpeg and ffprobe) to use --dub."
+        )
+
+
 def _dub_and_mux(
     fpath: Path,
     segments: list[Segment],
@@ -106,6 +167,8 @@ def _dub_and_mux(
     from movie_subtitles.dub import synthesise_track
     from movie_subtitles.mux import mux_dub
     from movie_subtitles.providers.elevenlabs import Speak
+
+    _check_ffmpeg_tools()
 
     audio_track = fpath.with_name(f"{fpath.stem}.dub_audio.mp3")
     tts = Speak()
@@ -156,7 +219,23 @@ def main() -> None:
         type=str,
         choices=["local", "elevenlabs"],
         default="local",
-        help="The provider engine to use for transcription and translation",
+        help="The provider engine to use for transcription and translation (shorthand for "
+        "--asr-engine and --translation-engine when those are not set)",
+    )
+    parser.add_argument(
+        "--asr-engine",
+        type=str,
+        choices=["local", "elevenlabs"],
+        default=None,
+        help="Override --engine for the ASR (transcription) stage only",
+    )
+    parser.add_argument(
+        "--translation-engine",
+        type=str,
+        choices=["local", "elevenlabs"],
+        default=None,
+        help="Override --engine for the translation stage only. --dub requires this to "
+        "resolve to 'elevenlabs', since the local translator ignores the length budget",
     )
     parser.add_argument(
         "--dub",
@@ -185,10 +264,18 @@ def main() -> None:
             args.whisper_model,
             args.mt_model,
             engine=args.engine,
+            asr_engine=args.asr_engine,
+            translation_engine=args.translation_engine,
             dub=args.dub,
             managed=args.managed,
         )
-    except (RuntimeError, ValueError, FileNotFoundError, TimeoutError) as exc:
+    except (
+        RuntimeError,
+        ValueError,
+        FileNotFoundError,
+        TimeoutError,
+        subprocess.CalledProcessError,
+    ) as exc:
         logger.error(str(exc))
         raise SystemExit(1) from None
 
