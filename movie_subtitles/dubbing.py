@@ -2,7 +2,7 @@ import logging
 import time
 from pathlib import Path
 
-from movie_subtitles.providers.elevenlabs import _build_client
+from movie_subtitles.providers.elevenlabs import build_client
 
 logger = logging.getLogger("dubbing")
 
@@ -34,7 +34,7 @@ class ManagedDub:
         self.poll_interval = poll_interval
         self.timeout = timeout
 
-        self.client = _build_client()
+        self.client = build_client()
 
     def __call__(self, fpath: str | Path, source_lang: str, target_lang: str) -> Path:
         return self.dub(fpath, source_lang, target_lang)

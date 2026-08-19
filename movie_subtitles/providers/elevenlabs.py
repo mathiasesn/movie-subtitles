@@ -2,6 +2,7 @@ import logging
 import os
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 from elevenlabs.client import ElevenLabs
 from elevenlabs.types.voice_settings import VoiceSettings
@@ -17,7 +18,7 @@ _SENTENCE_END_CHARS = (".", "!", "?", "…")
 _DEFAULT_VOICE_ID = "EXAVITQu4vr4xnSDxMaL"
 
 
-def _build_client() -> ElevenLabs:
+def build_client() -> ElevenLabs:
     api_key = os.environ.get("ELEVENLABS_API_KEY")
     if not api_key:
         raise RuntimeError(
@@ -39,7 +40,7 @@ class ScribeTranscribe:
         self.max_segment_seconds = max_segment_seconds
         self.max_segment_chars = max_segment_chars
 
-        self.client = _build_client()
+        self.client = build_client()
 
     def __call__(self, fpath: str | Path, audio_lang: str) -> Iterable[Segment]:
         return self.transcribe(fpath, audio_lang)
@@ -65,9 +66,9 @@ class ScribeTranscribe:
 
         return self._group_words(words)
 
-    def _group_words(self, words: Iterable) -> Iterable[Segment]:
+    def _group_words(self, words: Iterable[Any]) -> Iterable[Segment]:
         segment_id = 0
-        buffer: list = []
+        buffer: list[Any] = []
         buffer_start: float | None = None
         buffer_end: float | None = None
 
@@ -137,7 +138,7 @@ class Speak:
         self.model_id = model_id
         self.output_format = output_format
 
-        self.client = _build_client()
+        self.client = build_client()
 
     def __call__(self, text: str, out_path: Path, speed: float = 1.0) -> Path:
         return self.speak(text, out_path, speed)

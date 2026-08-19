@@ -4,7 +4,7 @@ from pathlib import Path
 
 from tqdm.auto import tqdm
 
-from movie_subtitles.providers.base import Segment
+from movie_subtitles.providers.base import ASRProvider, Segment, TranslationProvider
 from movie_subtitles.srt import format_block
 
 logger = logging.getLogger("cli")
@@ -21,7 +21,9 @@ def _budget_chars(start: float, end: float) -> int:
     return max(int(duration * _CHARS_PER_SECOND), 1)
 
 
-def _build_providers(engine: str, whisper_model_name: str, mt_model_name: str):
+def _build_providers(
+    engine: str, whisper_model_name: str, mt_model_name: str
+) -> tuple[ASRProvider, TranslationProvider]:
     if engine == "local":
         from movie_subtitles.providers.local import Transcribe, Translate
 
@@ -41,6 +43,7 @@ def create_subtitles(
     srt_lang: str = "da",
     whisper_model_name: str = "large-v3",
     mt_model_name: str = "jbochi/madlad400-3b-mt",
+    *,
     engine: str = "local",
     dub: bool = False,
     managed: bool = False,
