@@ -1,3 +1,12 @@
+_CUE_PAD = 0.5
+
+
+def pad_cue_end(end: float, next_start: float | None) -> float:
+    """Pad a cue's end time for readability, capped so it never overlaps the next cue."""
+    padded = end + _CUE_PAD
+    return padded if next_start is None else min(padded, next_start)
+
+
 def format_timestamp(seconds: float) -> str:
     total_ms = round(seconds * 1000)
     hours, remainder_ms = divmod(total_ms, 3_600_000)

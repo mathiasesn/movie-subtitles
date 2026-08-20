@@ -15,7 +15,7 @@ from movie_subtitles.providers.base import (
     TranslationProvider,
     TTSProvider,
 )
-from movie_subtitles.srt import format_block
+from movie_subtitles.srt import format_block, pad_cue_end
 
 logger = logging.getLogger("cli")
 
@@ -23,7 +23,7 @@ logger = logging.getLogger("cli")
 def _positive_int(value: str) -> int:
     n = int(value)
     if n < 1:
-        raise ArgumentTypeError(f"--dub-workers must be >= 1, got {n}")
+        raise ArgumentTypeError(f"must be >= 1, got {n}")
     return n
 
 
@@ -104,6 +104,7 @@ def create_subtitles(
     managed: bool = False,
     tts_engine: str | None = None,
     dub_workers: int = 1,
+    dub_correction_passes: int = 3,
 ) -> None:
     if isinstance(fpath, str):
         fpath = Path(fpath)
@@ -164,6 +165,14 @@ def create_subtitles(
     dub_segments: list[Segment] = []
     dub_translations: dict[int, str] = {}
     cue_id = 0
+    # One-segment lookahead: a cue's padded end must not overlap the next emitted
+    # cue's start, but that start is only known once the following segment arrives.
+    # `pending` holds the most recently emitted (not-yet-written) cue's data, and is
+    # flushed as soon as the next cue's start is known (or with next_start=None at
+    # the end of the stream). This keeps `segments` a single lazy pass -- no
+    # materializing it into a list -- so ASR inference and the progress bar still
+    # drive off the same generator.
+    pending: tuple[int, float, float, str] | None = None
     for segment in tqdm(segments, desc="Writing to srt file"):
         budget_chars = _budget_chars(segment.start, segment.end)
         text = translator(segment.text, srt_lang, budget_chars=budget_chars)
@@ -171,17 +180,32 @@ def create_subtitles(
             continue
 
         cue_id += 1
-        srt_lines.append(format_block(cue_id, segment.start, segment.end, text))
+
+        if pending is not None:
+            p_id, p_start, p_end, p_text = pending
+            srt_lines.append(format_block(p_id, p_start, pad_cue_end(p_end, segment.start), p_text))
+        pending = (cue_id, segment.start, segment.end, text)
 
         if dub:
             dub_segments.append(segment)
             dub_translations[segment.id] = text
 
+    if pending is not None:
+        p_id, p_start, p_end, p_text = pending
+        srt_lines.append(format_block(p_id, p_start, pad_cue_end(p_end, None), p_text))
+
     srt_file.write_text("".join(srt_lines), encoding="utf-8")
     logger.info(f"Saved srt file to {srt_file}")
 
     if tts is not None:
-        _dub_and_mux(fpath, dub_segments, dub_translations, tts, dub_workers=dub_workers)
+        _dub_and_mux(
+            fpath,
+            dub_segments,
+            dub_translations,
+            tts,
+            dub_workers=dub_workers,
+            dub_correction_passes=dub_correction_passes,
+        )
 
 
 def _run_managed(fpath: Path, audio_lang: str, srt_lang: str) -> None:
@@ -250,6 +274,7 @@ def _dub_and_mux(
     translations: dict[int, str],
     tts: TTSProvider,
     dub_workers: int,
+    dub_correction_passes: int,
 ) -> None:
     from movie_subtitles.dub import synthesise_track
     from movie_subtitles.mux import mux_dub
@@ -258,7 +283,13 @@ def _dub_and_mux(
     aligner = _build_aligner()
 
     synthesise_track(
-        segments, translations, tts, audio_track, aligner=aligner, max_workers=dub_workers
+        segments,
+        translations,
+        tts,
+        audio_track,
+        aligner=aligner,
+        max_workers=dub_workers,
+        correction_passes=dub_correction_passes,
     )
 
     dubbed_path = mux_dub(fpath, audio_track)
@@ -375,6 +406,16 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--dub-correction-passes",
+        type=_positive_int,
+        default=3,
+        help=(
+            "Maximum number of corrective re-synthesis passes a drifted group gets "
+            "during --dub synthesis. Each pass costs paid TTS; 1 reproduces the old "
+            "single-pass behaviour. Defaults to 3"
+        ),
+    )
+    parser.add_argument(
         "--managed",
         action="store_true",
         help=(
@@ -399,6 +440,7 @@ def main() -> None:
             managed=args.managed,
             tts_engine=args.tts_engine,
             dub_workers=args.dub_workers,
+            dub_correction_passes=args.dub_correction_passes,
         )
     except (
         RuntimeError,
