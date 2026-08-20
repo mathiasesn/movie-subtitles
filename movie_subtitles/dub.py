@@ -172,16 +172,16 @@ def _submit_group(
     ]
 
 
-def _resolve(futures: list[Future]) -> None:
+def _resolve(futures: list[Future[_Clip]]) -> None:
     """Wait for `futures` to finish, failing fast on the first exception.
 
     Shared by both synthesis phases so their abort behaviour cannot drift. Waits with
     `FIRST_EXCEPTION`; on a failure, cancels every future in the batch (a no-op on any
     task that has already started, so this only cancels the still-queued tail), logs a
-    WARNING reporting how many of the batch completed vs. were cancelled, and re-raises
-    the original exception instance. The caller's own `.result()` collection afterwards
-    is then guaranteed not to block and not to raise. On success, returns normally and
-    leaves every future's `.result()` ready to collect.
+    WARNING naming every category of the batch's spend, and re-raises the original
+    exception instance. The caller's own `.result()` collection afterwards is then
+    guaranteed not to block and not to raise. On success, returns normally and leaves
+    every future's `.result()` ready to collect.
     """
     done, _ = wait(futures, return_when=FIRST_EXCEPTION)
 
@@ -190,10 +190,24 @@ def _resolve(futures: list[Future]) -> None:
         return
 
     cancelled = sum(1 for future in futures if future.cancel())
-    completed = sum(1 for future in futures if future.done() and not future.cancelled())
+    succeeded = sum(
+        1
+        for future in futures
+        if future.done() and not future.cancelled() and future.exception() is None
+    )
+    failed = sum(
+        1
+        for future in futures
+        if future.done() and not future.cancelled() and future.exception() is not None
+    )
+    # The remainder are already-running tasks that were neither cancellable nor done at
+    # the moment of failure; they will still run to completion (and be billed) during the
+    # pool's subsequent shutdown(wait=True), so name them rather than let them go uncounted.
+    in_flight = len(futures) - cancelled - succeeded - failed
     logger.warning(
-        f"Dub synthesis task failed: {completed} of {len(futures)} segment(s) completed, "
-        f"{cancelled} cancelled before starting."
+        f"Dub synthesis task failed: {succeeded} succeeded, {failed} failed, {cancelled} "
+        f"cancelled before starting, {in_flight} still in flight and will complete (and be billed) "
+        f"before abort, out of {len(futures)} segment(s)."
     )
     raise failure.exception()
 
