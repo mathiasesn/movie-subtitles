@@ -1,7 +1,4 @@
-import logging
 import subprocess
-
-logger = logging.getLogger("ffmpeg")
 
 # Matroska/MP4 take AAC, but WebM's spec only admits Vorbis and Opus: handing it
 # `-c:a aac` makes ffmpeg fail at header-write time with a bare "Invalid argument"

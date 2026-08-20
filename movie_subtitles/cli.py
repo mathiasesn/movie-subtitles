@@ -2,7 +2,7 @@ import logging
 import os
 import shutil
 import subprocess
-from argparse import ArgumentParser
+from argparse import ArgumentParser, ArgumentTypeError
 from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
@@ -18,6 +18,13 @@ from movie_subtitles.providers.base import (
 from movie_subtitles.srt import format_block
 
 logger = logging.getLogger("cli")
+
+
+def _positive_int(value: str) -> int:
+    n = int(value)
+    if n < 1:
+        raise ArgumentTypeError(f"--dub-workers must be >= 1, got {n}")
+    return n
 
 
 # Assumption, not a measured value: rough average speaking rate used to derive a
@@ -359,7 +366,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--dub-workers",
-        type=int,
+        type=_positive_int,
         default=8,
         help=(
             "Maximum number of TTS/alignment calls to run concurrently during --dub "
