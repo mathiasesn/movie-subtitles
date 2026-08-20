@@ -211,7 +211,7 @@ def _build_aligner() -> AlignmentProvider:
     a per-call basis, ending in the never-failing `DurationAlign`, so this never returns
     `None`.
     """
-    from movie_subtitles.providers.base import FallbackAlign
+    from movie_subtitles.providers.fallback import FallbackAlign
     from movie_subtitles.providers.ffmpeg_align import DurationAlign, SilenceAlign
 
     providers: list[AlignmentProvider] = []

@@ -32,8 +32,10 @@ movie_subtitles/
   dubbing.py        # ManagedDub: the --managed path, independent of the rest
   providers/
     base.py          # Segment dataclass + ASRProvider / TranslationProvider /
-                      # TTSProvider Protocols + FallbackAlign, which composes
-                      # AlignmentProviders into a thread-safe degrade chain
+                      # TTSProvider / AlignmentProvider Protocols -- pure type
+                      # surface, no behaviour
+    fallback.py       # FallbackAlign: composes AlignmentProviders into a
+                      # thread-safe degrade chain; no vendor SDK imports
     local.py          # Transcribe (faster-whisper) + Translate (MADLAD400 T5)
     elevenlabs.py      # ScribeTranscribe (ASR) + Speak (TTS) + Align (Forced Alignment,
                        # the first tier of the alignment chain); shared build_client()
@@ -66,7 +68,7 @@ CI (`.github/workflows/ci.yml`) runs those two ruff checks and nothing else — 
 - **Model/API wrappers are callable classes.** Load the model/client in `__init__`, expose a named method (`transcribe` / `translate` / `speak` / `dub`), and have `__call__` delegate to it. New backends follow the same shape.
 - **Orchestration lives only in `cli.py`.** Providers know nothing about each other, about SRT, or about dubbing.
 - **Providers implement Protocols (`providers/base.py`), not base classes.** `_build_asr_provider`/`_build_translation_provider`/`_build_tts_provider` in `cli.py` are the only places that pick a concrete class per engine; `_build_providers()` wraps the first two for the stages every invocation needs.
-- **Speech-boundary measurement is a degrade chain, not a single call.** `cli.py:_build_aligner()` always returns an `AlignmentProvider` (never `None`): it assembles `providers/base.py:FallbackAlign([Align()?, SilenceAlign(), DurationAlign()])`, omitting `Align()` when `ELEVENLABS_API_KEY` is unset or construction fails. `FallbackAlign` tries each tier in order, latches a failing one off for the rest of the run, and raises `RuntimeError` only once every tier is exhausted. `dub.py`'s `synthesise_track(..., *, aligner: AlignmentProvider, max_workers: int = 8)` requires `aligner` — it no longer measures boundaries itself.
+- **Speech-boundary measurement is a degrade chain, not a single call.** `cli.py:_build_aligner()` always returns an `AlignmentProvider` (never `None`): it assembles `providers/fallback.py:FallbackAlign([Align()?, SilenceAlign(), DurationAlign()])`, omitting `Align()` when `ELEVENLABS_API_KEY` is unset or construction fails. `FallbackAlign` tries each tier in order, latches a failing one off for the rest of the run, and raises `RuntimeError` only once every tier is exhausted. `dub.py`'s `synthesise_track(..., *, aligner: AlignmentProvider, max_workers: int = 8)` requires `aligner` — it no longer measures boundaries itself.
 - **Provider modules are imported lazily, inside `cli.py`'s builders.** Each provider module imports its own vendor SDK at module top level, but `cli.py`'s `_build_asr_provider`/`_build_translation_provider`/`_build_tts_provider` import the provider module itself only inside the branch that needs it — this is what lets `--engine local` run without importing the ElevenLabs/Anthropic/OpenAI SDKs, and vice versa.
 - **Defaults are duplicated** between class `__init__` signatures and argparse. Change both together.
 - **Do not reorder `create_subtitles()` parameters** — `main()` passes the first five positionally. New params are keyword-only, appended at the end.
