@@ -1,16 +1,30 @@
 import logging
+import os
 import shutil
 import subprocess
-from argparse import ArgumentParser
+from argparse import ArgumentParser, ArgumentTypeError
 from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
 from tqdm.auto import tqdm
 
-from movie_subtitles.providers.base import ASRProvider, Segment, TranslationProvider, TTSProvider
+from movie_subtitles.providers.base import (
+    AlignmentProvider,
+    ASRProvider,
+    Segment,
+    TranslationProvider,
+    TTSProvider,
+)
 from movie_subtitles.srt import format_block
 
 logger = logging.getLogger("cli")
+
+
+def _positive_int(value: str) -> int:
+    n = int(value)
+    if n < 1:
+        raise ArgumentTypeError(f"--dub-workers must be >= 1, got {n}")
+    return n
 
 
 # Assumption, not a measured value: rough average speaking rate used to derive a
@@ -89,6 +103,7 @@ def create_subtitles(
     dub: bool = False,
     managed: bool = False,
     tts_engine: str | None = None,
+    dub_workers: int = 1,
 ) -> None:
     if isinstance(fpath, str):
         fpath = Path(fpath)
@@ -166,7 +181,7 @@ def create_subtitles(
     logger.info(f"Saved srt file to {srt_file}")
 
     if tts is not None:
-        _dub_and_mux(fpath, dub_segments, dub_translations, tts)
+        _dub_and_mux(fpath, dub_segments, dub_translations, tts, dub_workers=dub_workers)
 
 
 def _run_managed(fpath: Path, audio_lang: str, srt_lang: str) -> None:
@@ -193,18 +208,58 @@ def _check_ffmpeg_tools() -> None:
         )
 
 
+def _build_aligner() -> AlignmentProvider:
+    """Build the Forced Alignment -> silencedetect -> container-duration degrade chain.
+
+    Forced Alignment is a nice-to-have, not a hard requirement for --dub: a
+    --tts-engine openai user may have no ELEVENLABS_API_KEY at all. So any failure
+    building it (missing key, client construction error) is caught and logged, and the
+    chain is built without it -- `FallbackAlign` degrades through the remaining tiers on
+    a per-call basis, ending in the never-failing `DurationAlign`, so this never returns
+    `None`.
+    """
+    from movie_subtitles.providers.fallback import FallbackAlign
+    from movie_subtitles.providers.ffmpeg_align import DurationAlign, SilenceAlign
+
+    providers: list[AlignmentProvider] = []
+
+    if not os.environ.get("ELEVENLABS_API_KEY"):
+        logger.info(
+            "ELEVENLABS_API_KEY not set: speech-boundary measurement will fall back to "
+            "ffmpeg silencedetect instead of Forced Alignment."
+        )
+    else:
+        from movie_subtitles.providers.elevenlabs import Align
+
+        try:
+            providers.append(Align())
+        except Exception as exc:
+            logger.warning(
+                f"Could not build the Forced Alignment aligner ({exc}); speech-boundary "
+                "measurement will fall back to ffmpeg silencedetect."
+            )
+
+    providers.extend((SilenceAlign(), DurationAlign()))
+
+    return FallbackAlign(providers)
+
+
 def _dub_and_mux(
     fpath: Path,
     segments: list[Segment],
     translations: dict[int, str],
     tts: TTSProvider,
+    dub_workers: int,
 ) -> None:
     from movie_subtitles.dub import synthesise_track
     from movie_subtitles.mux import mux_dub
 
     audio_track = fpath.with_name(f"{fpath.stem}.dub_audio.mp3")
+    aligner = _build_aligner()
 
-    synthesise_track(segments, translations, tts, audio_track)
+    synthesise_track(
+        segments, translations, tts, audio_track, aligner=aligner, max_workers=dub_workers
+    )
 
     dubbed_path = mux_dub(fpath, audio_track)
     logger.info(f"Saved dubbed video to {dubbed_path}")
@@ -310,6 +365,16 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--dub-workers",
+        type=_positive_int,
+        default=1,
+        help=(
+            "Maximum number of TTS/alignment calls to run concurrently during --dub "
+            "synthesis. Defaults to 1 (serial), since vendor concurrency caps are "
+            "per-subscription and low -- raise it to what your TTS plan allows"
+        ),
+    )
+    parser.add_argument(
         "--managed",
         action="store_true",
         help=(
@@ -333,6 +398,7 @@ def main() -> None:
             dub=args.dub,
             managed=args.managed,
             tts_engine=args.tts_engine,
+            dub_workers=args.dub_workers,
         )
     except (
         RuntimeError,
