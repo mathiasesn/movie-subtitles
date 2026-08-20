@@ -115,11 +115,13 @@ movie-subtitles --input clip.mp4 --asr-engine elevenlabs --translation-engine op
 movie-subtitles --input clip.mp4 --managed
 ```
 
-Other flags: `--audio-lang`, `--srt-lang`, `--whisper-model`, `--mt-model`. Run
-`movie-subtitles --help` for the full list.
+Other flags: `--audio-lang`, `--srt-lang`, `--whisper-model`, `--mt-model`,
+`--dub-workers`, `--dub-correction-passes`. Run `movie-subtitles --help` for the
+full list.
 
 ### Dubbing notes
 
+- **Emitted `.srt` cue ends are padded, not raw ASR timings.** At write time, each cue's end is extended by up to `_CUE_PAD` (0.5s) toward the next cue's start (never past it, and never before the cue's own end) for subtitle readability. This applies to every `.srt` output, not only `--dub` runs; `dub.py` groups, anchors, and measures drift against the unpadded, word-accurate segment timings, so this only affects the written `.srt` file.
 - **`--dub` replaces the original audio track, it does not mix with it.** Only the
   synthesised track is mapped onto the source video; the original spoken audio is dropped.
 - **`--dub` and `--managed` are mutually exclusive.** `--managed` replaces the whole
