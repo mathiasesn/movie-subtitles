@@ -26,6 +26,20 @@ _DRIFT_TOLERANCE = 0.5
 _MIN_RATE = 0.9
 _MAX_RATE = 1.15
 
+# A composed rate within this much of the rate already applied is treated as no change:
+# below vendor speed granularity, so resynthesising would buy a full group of paid TTS
+# (plus one aligner call per segment) for effectively identical audio.
+_MIN_RATE_DELTA = 0.02
+
+# Bound on how many correction passes a drifted group may go through. The initial pass
+# (1.0x) does not count as a pass; this bounds the correction loop that follows it. Each
+# pass is a full round of paid TTS for the groups it touches, so this is a cost control as
+# much as a termination guard. `correction_passes=1` bounds correction to a single pass --
+# it does not reproduce the old fixed phase-A/phase-B behaviour exactly, since the drift
+# metric itself changed (speech time, not wall-clock cue span) and a non-improving pass is
+# now discarded rather than always kept.
+_MAX_CORRECTION_PASSES = 3
+
 # Default bound on how many TTS/alignment calls may be in flight at once. Threaded through
 # from --dub-workers. The default is 1 -- fully serial -- because vendor concurrency caps
 # are per-subscription and low: an ElevenLabs plan permitting 3 concurrent requests 429s
@@ -62,15 +76,11 @@ class _Placement:
     speech_len: float
 
 
-def fit_rate(actual_duration: float, slot_duration: float) -> float:
-    """Compute the speaking rate needed to fit `actual_duration` into `slot_duration`.
-
-    Returns the rate clamped to [_MIN_RATE, _MAX_RATE].
-    """
+def _required_rate(actual_duration: float, slot_duration: float) -> float:
+    """The unclamped speaking rate needed to fit `actual_duration` into `slot_duration`."""
     if slot_duration <= 0 or actual_duration <= 0:
         return 1.0
-
-    return min(max(actual_duration / slot_duration, _MIN_RATE), _MAX_RATE)
+    return actual_duration / slot_duration
 
 
 def _tts_with_retry(tts: TTSProvider, text: str, clip_path: Path, rate: float) -> None:
@@ -99,17 +109,52 @@ def _tts_with_retry(tts: TTSProvider, text: str, clip_path: Path, rate: float) -
             time.sleep(backoff)
 
 
+def _speech_bounds(segment: Segment) -> tuple[float, float]:
+    """The segment's real speech interval: word bounds when available, else cue bounds.
+
+    `(words[0].start, words[-1].end)` when word timings are available, else
+    `(segment.start, segment.end)`. This is the single source of truth for "how long did
+    this segment really take to say" -- both drift measurement (`_speech_duration`) and
+    anchor grouping (`_inter_segment_gap`) derive from it, so they cannot silently
+    disagree about a segment's speech span.
+    """
+    if segment.words:
+        return segment.words[0].start, segment.words[-1].end
+    return segment.start, segment.end
+
+
+def _speech_duration(segment: Segment) -> float:
+    """The real speech duration of one segment.
+
+    `words[-1].end - words[0].start` when word timings are available, else the cue span
+    `segment.end - segment.start`. This is what drift is measured against (layer 5): the
+    wall-clock cue span can include long intra-cue pauses that have nothing to do with how
+    long the synthesised speech should take.
+    """
+    start, end = _speech_bounds(segment)
+    return max(end - start, 0.0)
+
+
+def _group_speech_span(group: list[Segment]) -> float:
+    """Summed source speech duration for every segment in `group`."""
+    return sum(_speech_duration(segment) for segment in group)
+
+
 def _lay_out_and_drift(group: list[Segment], clips: list[_Clip]) -> tuple[list[_Placement], float]:
     """Lay `group` out from its own anchor and report its accumulated drift.
 
-    The group's anchor is its first segment's start and its source end is its last
-    segment's end, both derived here so the two callers (the phase-A layout pass and the
-    phase-B re-layout) cannot disagree. Drift is the placed end of the last clip measured
-    against the group's source end; positive means the group ran long.
+    The group's anchor is its first segment's start, derived here so every caller (the
+    initial layout pass and each correction pass's re-layout) cannot disagree. Drift is
+    measured as the synthesised speech total (summed clip speech lengths) against the
+    group's summed *source speech time* (`_group_speech_span`, layer 5) -- not the
+    wall-clock cue span the old implementation used, which invented drift out of ordinary
+    intra-cue pauses. Positive means the synthesised speech ran long relative to the
+    source speech it should match.
     """
-    group_source_end = group[-1].end
-    placements, placed_end = _layout_group(group, clips, group[0].start, group_source_end)
-    return placements, placed_end - group_source_end
+    placements, placed_end = _layout_group(group, clips)
+    speech_total = sum(clip.speech_len for clip in clips)
+    drift = speech_total - _group_speech_span(group)
+    return placements, drift
 
 
 def _synthesise_and_measure(
@@ -119,34 +164,71 @@ def _synthesise_and_measure(
     aligner: AlignmentProvider,
     work_dir: Path,
     rate: float,
+    pass_num: int,
 ) -> _Clip:
-    """Synthesise one segment at `rate` and measure its speech boundaries.
+    """Synthesise one segment at `rate` for correction pass `pass_num` and measure its
+    speech boundaries.
 
-    This is the unit of work submitted to the thread pool for both phase A and phase B.
+    This is the unit of work submitted to the thread pool for the initial pass (pass 0)
+    and every correction pass thereafter. `pass_num` is baked into the on-disk path
+    (`segment_{id:05d}_p{pass_num:02d}.mp3`) rather than the rate: the rate clamp
+    saturating means two different passes very often request the identical rate (e.g.
+    repeated 0.90x), which would collide on a rate-keyed name. Every `_Clip` this returns
+    therefore always points at the exact audio it was measured from, even if a later pass
+    is rejected and an earlier pass's `_Clip` is what the caller keeps.
     """
-    clip_path = work_dir / f"segment_{segment.id:05d}.mp3"
+    clip_path = work_dir / f"segment_{segment.id:05d}_p{pass_num:02d}.mp3"
     _tts_with_retry(tts, text, clip_path, rate)
     speech_start, speech_end = aligner(clip_path, text)
     return _Clip(clip_path, speech_start, speech_end)
 
 
+def _inter_segment_gap(prev: Segment, nxt: Segment) -> float:
+    """Compute the silence gap between two consecutive segments.
+
+    Computed as `next`'s speech start minus `prev`'s speech end, both via
+    `_speech_bounds` -- word-level timings when available (so a backend emitting
+    exactly-contiguous cue boundaries, e.g. ElevenLabs Scribe, see
+    `specs/fix-dub-out-of-sync-contiguous-cues.md`, still yields real gaps), else the
+    cue-boundary fallback (`local`/`openai` ASR, where `words is None`), degrading cleanly
+    rather than requiring word timings everywhere.
+    """
+    _, prev_end = _speech_bounds(prev)
+    nxt_start, _ = _speech_bounds(nxt)
+    return nxt_start - prev_end
+
+
 def _group_segments(segments: list[Segment]) -> list[list[Segment]]:
     """Partition segments into anchor groups by inter-segment silence gap.
 
-    A new group starts whenever `segment.start - prev.end > _GAP_THRESHOLD`, computed
-    over the *full* segment list (including untranslated segments) so an untranslated
-    segment's span still counts toward the gap and cannot merge two scenes that should
-    stay separate. Each group's anchor is its first segment's start.
+    A new group starts whenever `_inter_segment_gap(prev, segment) > _GAP_THRESHOLD`,
+    computed over the *full* segment list (including untranslated segments) so an
+    untranslated segment's span still counts toward the gap and cannot merge two scenes
+    that should stay separate. Each group's anchor is its first segment's start.
+
+    If this partitions the whole input into a single group with no internal gap exceeding
+    `_GAP_THRESHOLD`, that is logged as a WARNING rather than accepted silently -- it is
+    the degenerate case that let a whole-clip group swallow all trailing slack as silence
+    (see the spec above).
     """
     groups: list[list[Segment]] = []
     current: list[Segment] = []
     for segment in segments:
-        if current and segment.start - current[-1].end > _GAP_THRESHOLD:
+        if current and _inter_segment_gap(current[-1], segment) > _GAP_THRESHOLD:
             groups.append(current)
             current = []
         current.append(segment)
     if current:
         groups.append(current)
+
+    if len(segments) > 1 and len(groups) == 1:
+        logger.warning(
+            f"Segmentation produced a single anchor group spanning all {len(segments)} "
+            "segment(s) with no inter-segment gap exceeding "
+            f"{_GAP_THRESHOLD}s; drift correction will have no inter-scene silence to "
+            "absorb into."
+        )
+
     return groups
 
 
@@ -158,10 +240,15 @@ def _submit_group(
     aligner: AlignmentProvider,
     work_dir: Path,
     rate: float,
+    pass_num: int,
 ) -> list[Future[_Clip]]:
-    """Submit every segment of `group` to `executor` at `rate`, in group order.
+    """Submit every segment of `group` to `executor` at `rate` for pass `pass_num`, in
+    group order.
 
-    Shared by both synthesis phases, so the unit-of-work signature is named once.
+    Shared by the initial pass and every correction pass, so the unit-of-work signature is
+    named once. `pass_num` (0 for the initial pass, 1.. for each correction pass) is
+    threaded through to `_synthesise_and_measure` so each pass writes to its own on-disk
+    path instead of overwriting a previous pass's file.
     """
     return [
         executor.submit(
@@ -172,6 +259,7 @@ def _submit_group(
             aligner,
             work_dir,
             rate,
+            pass_num,
         )
         for segment in group
     ]
@@ -251,33 +339,61 @@ def _resolve(batches: Iterable[list[Future[_Clip]]]) -> list[list[_Clip]]:
     return [[future.result() for future in batch] for batch in grouped]
 
 
-def _layout_group(
-    group: list[Segment],
-    clips: list[_Clip],
-    anchor: float,
-    group_source_end: float,
-) -> tuple[list[_Placement], float]:
-    """Lay a group's clips out sequentially from its anchor.
+def _layout_group(group: list[Segment], clips: list[_Clip]) -> tuple[list[_Placement], float]:
+    """Lay a group's clips out, pinned to their own ASR start.
 
-    Clip 1 is placed at the anchor; each subsequent clip is placed at
-    `prev_placed_end + min(source_gap, remaining_slack)`, where `remaining_slack` is the
-    room left before the group's natural source end. Clip 1 needs no special case: it
-    starts from `prev_source_end = group[0].start`, so its source gap is zero and the
-    general formula already puts it exactly on the anchor. Returns the placements and the
-    placed end of the last clip.
+    Each clip is placed at `max(segment.start, prev_placed_end)`, seeded from
+    `group[0].start`. This is what stops a group whose speech is shorter than its source
+    span from piling all the unused slack up as trailing silence at the end: later clips
+    still start at/after their own `segment.start` instead of floating from wherever the
+    previous clip happened to end. Returns the placements and the placed end of the last
+    clip.
     """
     placements: list[_Placement] = []
-    prev_placed_end = anchor
-    prev_source_end = group[0].start
+    prev_placed_end = group[0].start
     for segment, clip in zip(group, clips, strict=True):
-        source_gap = max(segment.start - prev_source_end, 0.0)
-        remaining_slack = max(group_source_end - prev_placed_end, 0.0)
-        placed_start = prev_placed_end + min(source_gap, remaining_slack)
+        placed_start = max(segment.start, prev_placed_end)
         placements.append(_Placement(placed_start, clip.path, clip.speech_start, clip.speech_len))
         prev_placed_end = placed_start + clip.speech_len
-        prev_source_end = segment.end
 
     return placements, prev_placed_end
+
+
+def _corrective_rate(
+    idx: int,
+    group: list[Segment],
+    current_rate: float,
+    drift: float,
+    speech_total: float,
+) -> float:
+    """Compute group `idx`'s next corrective rate by composing onto `current_rate`.
+
+    `speech_total` -- the synthesised speech total the caller already computed while
+    measuring `drift` (`_lay_out_and_drift`) -- is the clip-side half of the exact-fit
+    ratio; `source_span` (computed here) is the source-side half, so both halves of the
+    drift definition are visible together in one place. `speech_total` reflects
+    `current_rate`, not 1.0x, so the exact-fit ratio `_required_rate(speech_total,
+    source_span)` it implies is relative to `current_rate`, not absolute -- applying it as
+    an absolute `voice_settings.speed` would silently discard whatever correction
+    `current_rate` already bought (e.g. requesting 1.10x, then on the next pass computing
+    1.042x from the result and applying that as-is, which is *slower* than 1.10x and
+    undoes the first pass). The next rate is therefore `current_rate *
+    _required_rate(...)`, clamped to [_MIN_RATE, _MAX_RATE] same as before. When the
+    unclamped composed rate falls outside that range, the clamped rate is used but a
+    WARNING names both the unclamped rate and the residual `drift`, so a structural
+    shortfall a rate change cannot fix stays visible instead of reading as success.
+    """
+    source_span = _group_speech_span(group)
+    unclamped = current_rate * _required_rate(speech_total, source_span)
+    rate = min(max(unclamped, _MIN_RATE), _MAX_RATE)
+    if rate != unclamped:
+        logger.warning(
+            f"Group {idx} ({len(group)} segment(s)) needs an unclamped rate of "
+            f"{unclamped:.2f}x (composed onto the already-applied {current_rate:.2f}x) to "
+            f"close a {drift:+.2f}s drift; clamping to {rate:.2f}x, which will not fully "
+            "correct it -- this is a structural shortfall, not a speaking-rate problem."
+        )
+    return rate
 
 
 def synthesise_track(
@@ -289,29 +405,47 @@ def synthesise_track(
     *,
     aligner: AlignmentProvider,
     max_workers: int = _MAX_WORKERS,
+    correction_passes: int = _MAX_CORRECTION_PASSES,
 ) -> Path:
     """Synthesise translated segments and assemble them onto a silent timeline.
 
     `translations` maps segment.id -> translated text (segments with no translation,
     e.g. filtered out upstream, are skipped). Segments are partitioned into scene-anchored
-    groups (see `_group_segments`); within a group, clips float sequentially from the
-    group's anchor at their natural 1.0x rate. If the group's accumulated drift against its
-    source span exceeds `_DRIFT_TOLERANCE`, the whole group is re-synthesised once at a
-    single shared corrective rate clamped to [_MIN_RATE, _MAX_RATE].
+    groups (see `_group_segments`); within a group, clips are pinned to their own ASR
+    start and float forward only when the previous clip overran it (`_layout_group`). If a
+    group's accumulated drift -- synthesised speech total against summed *source speech
+    time*, not wall-clock cue span (`_lay_out_and_drift`) -- exceeds `_DRIFT_TOLERANCE`,
+    the whole group is re-synthesised at a shared corrective rate clamped to
+    [_MIN_RATE, _MAX_RATE].
 
     Synthesis and measurement run over one bounded `ThreadPoolExecutor` (size
-    `max_workers`) in two flat batches, independent of group boundaries: phase A submits
-    every translated segment of every group at 1.0x, each task synthesising with `tts` and
-    then measuring with `aligner` (a `(clip: Path, text: str) -> (speech_start,
-    speech_end)` callable, e.g. `FallbackAlign`). Each phase fails fast: if any task in the
-    batch raises, no not-yet-started task in that batch is started (see `_resolve`), and
-    the original exception propagates to the caller after up to `max_workers` already-
-    running tasks finish. Results are otherwise collected by submission index, so a
-    successful outcome does not depend on completion order. A purely arithmetic layout
-    pass then walks the groups in order computing drift and, for any group past
-    `_DRIFT_TOLERANCE`, its shared corrective rate. Phase B is a second flat batch,
-    resynthesising only the segments of drifted groups at their group's rate; those groups
-    are then re-laid-out. Per-group log lines are emitted from the layout passes, in group
+    `max_workers`). The initial pass submits every translated segment of every group at
+    1.0x as one flat batch, each task synthesising with `tts` and then measuring with
+    `aligner` (a `(clip: Path, text: str) -> (speech_start, speech_end)` callable, e.g.
+    `FallbackAlign`). A purely arithmetic layout pass then walks the groups computing
+    drift and, for any group past `_DRIFT_TOLERANCE`, its shared corrective rate.
+
+    What follows is a bounded correction loop, run for up to `correction_passes` passes:
+    each pass submits one flat cross-group batch -- only the segments of groups still
+    outside tolerance -- through the same `_submit_group`/`_resolve` path, so the
+    documented fail-fast and abort-accounting semantics hold per pass exactly as they did
+    for the initial pass. After each pass, every corrected group is re-measured; a group
+    drops out of the loop as soon as it is back within tolerance, or as soon as a pass
+    fails to reduce its drift, or a pass's composed rate has saturated the clamp (cost
+    control -- each pass is paid TTS, and a group that cannot improve, or would only
+    resynthesise identical audio, is not worth paying for again). Corrective rates compose
+    across passes (`_corrective_rate` multiplies onto the rate the group's current clips
+    were actually synthesised at, not the 1.0x baseline), since each pass's measurement
+    reflects the *previous* pass's rate, not 1.0x. `correction_passes=1` bounds correction
+    to a single pass -- it does not reproduce the old fixed phase-A/phase-B behaviour
+    exactly, since the drift metric itself changed (speech time, not wall-clock cue span)
+    and a non-improving pass is now discarded rather than always kept.
+
+    Each phase/pass fails fast: if any task in its batch raises, no not-yet-started task
+    in that batch is started (see `_resolve`), and the original exception propagates to
+    the caller after up to `max_workers` already-running tasks finish. Results are
+    otherwise collected by submission index, so a successful outcome does not depend on
+    completion order. Per-group log lines are emitted from the layout passes, in group
     order, so they never interleave with synthesis. Produces one continuous audio file at
     `out_path`. Returns `out_path`.
     """
@@ -326,29 +460,31 @@ def synthesise_track(
     ]
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Phase A: one flat batch over every segment of every group at 1.0x.
-        phase_a_futures = [
-            _submit_group(executor, group, translations, tts, aligner, work_dir, 1.0)
+        # Initial pass: one flat batch over every segment of every group at 1.0x.
+        initial_futures = [
+            _submit_group(executor, group, translations, tts, aligner, work_dir, 1.0, 0)
             for group in groups
         ]
-        phase_a_clips = _resolve(phase_a_futures)
+        clips_by_group: dict[int, list[_Clip]] = dict(enumerate(_resolve(initial_futures)))
 
         # Layout pass (pure arithmetic): compute placements/drift and decide which groups
-        # need a corrective re-synthesis, keyed by group index.
+        # need a corrective re-synthesis, keyed by group index. `pending` is the single
+        # source of truth for "still being corrected": idx -> (drift, applied_rate), where
+        # applied_rate is the rate `clips_by_group[idx]` was actually synthesised at. It
+        # replaces two hand-synchronised dicts (a drift map and a separate rate map) whose
+        # keysets had to be kept in lockstep by hand; rebuilding it wholesale at the end of
+        # each pass (like `still_pending` below) means there is nothing to `del`.
         placements_by_group: list[list[_Placement]] = []
-        correction_rates: dict[int, float] = {}
+        pending: dict[int, tuple[float, float]] = {}
 
         for idx, group in enumerate(groups):
-            placements, drift = _lay_out_and_drift(group, phase_a_clips[idx])
+            placements, drift = _lay_out_and_drift(group, clips_by_group[idx])
             placements_by_group.append(placements)
-
             if abs(drift) > _DRIFT_TOLERANCE:
-                group_speech_len = sum(placement.speech_len for placement in placements)
-                shared_rate = fit_rate(group_speech_len, max(group[-1].end - group[0].start, 0.0))
-                correction_rates[idx] = shared_rate
+                pending[idx] = (drift, 1.0)
                 logger.info(
-                    f"Group {idx} ({len(group)} segment(s)) drifted {drift:+.2f}s past its "
-                    f"source span; re-synthesising once at a shared rate of {shared_rate:.2f}x."
+                    f"Group {idx} ({len(group)} segment(s)) drifted {drift:+.2f}s against "
+                    "its source speech time; entering the correction loop."
                 )
             else:
                 logger.info(
@@ -356,18 +492,92 @@ def synthesise_track(
                     "tolerance; left at 1.0x."
                 )
 
-        # Phase B: one flat batch over every segment of every drifted group, at that
-        # group's shared rate.
-        phase_b_futures = {
-            idx: _submit_group(executor, groups[idx], translations, tts, aligner, work_dir, rate)
-            for idx, rate in correction_rates.items()
-        }
-        phase_b_clips = dict(zip(phase_b_futures, _resolve(phase_b_futures.values()), strict=True))
+        # Groups the loop gave up on early (saturated/near-identical rate, or a pass that
+        # failed to improve), with the residual drift and why, so every abandoned group
+        # reaches the single terminal warning loop below alongside groups that simply ran
+        # out of passes.
+        abandoned: dict[int, tuple[float, str]] = {}
 
-    for idx in sorted(phase_b_clips):
-        placements, drift = _lay_out_and_drift(groups[idx], phase_b_clips[idx])
-        placements_by_group[idx] = placements
-        logger.info(f"Group {idx} corrected; residual drift {drift:+.2f}s.")
+        for pass_num in range(1, correction_passes + 1):
+            if not pending:
+                break
+
+            rates: dict[int, float] = {}
+            for idx, (drift, current_rate) in pending.items():
+                group = groups[idx]
+                # `speech_total` is the clip-side half of the drift definition that
+                # `_lay_out_and_drift` already computed a moment ago (for the initial pass)
+                # or a pass ago (for every subsequent one): drift = speech_total -
+                # source_span, so it is recovered arithmetically instead of re-summing
+                # `clips_by_group[idx]`.
+                speech_total = drift + _group_speech_span(group)
+                rate = _corrective_rate(idx, group, current_rate, drift, speech_total)
+                if abs(rate - current_rate) < _MIN_RATE_DELTA:
+                    # The newly-composed rate is within a hair of the one already applied,
+                    # so resynthesising would pay for effectively identical audio. Usually
+                    # the clamp saturating, but not always -- `_required_rate` also returns
+                    # exactly 1.0 for a non-positive span -- so only say "clamp" when the
+                    # rate actually sits on a bound. Distinct from "did not reduce drift"
+                    # below: this group is not even attempted this pass.
+                    reason = (
+                        "clamp saturated"
+                        if rate in (_MIN_RATE, _MAX_RATE)
+                        else "no further adjustment implied"
+                    )
+                    logger.info(
+                        f"Group {idx} pass {pass_num}/{correction_passes}: composed rate "
+                        f"{rate:.2f}x is within {_MIN_RATE_DELTA} of the already-applied "
+                        f"{current_rate:.2f}x ({reason}); skipping re-synthesis for this "
+                        "group."
+                    )
+                    abandoned[idx] = (drift, "no further rate change could improve it")
+                else:
+                    rates[idx] = rate
+
+            pending = {idx: pending[idx] for idx in rates}
+            if not pending:
+                break
+
+            pass_futures = {
+                idx: _submit_group(
+                    executor, groups[idx], translations, tts, aligner, work_dir, rate, pass_num
+                )
+                for idx, rate in rates.items()
+            }
+            pass_clips = dict(zip(pass_futures, _resolve(pass_futures.values()), strict=True))
+
+            still_pending: dict[int, tuple[float, float]] = {}
+            for idx, new_clips in pass_clips.items():
+                group = groups[idx]
+                old_drift, _ = pending[idx]
+                placements, new_drift = _lay_out_and_drift(group, new_clips)
+
+                if abs(new_drift) < abs(old_drift):
+                    clips_by_group[idx] = new_clips
+                    placements_by_group[idx] = placements
+                    logger.info(
+                        f"Group {idx} pass {pass_num}/{correction_passes}: drift "
+                        f"{old_drift:+.2f}s -> {new_drift:+.2f}s at {rates[idx]:.2f}x."
+                    )
+                    if abs(new_drift) > _DRIFT_TOLERANCE:
+                        still_pending[idx] = (new_drift, rates[idx])
+                else:
+                    logger.warning(
+                        f"Group {idx} pass {pass_num}/{correction_passes} did not reduce "
+                        f"drift ({old_drift:+.2f}s -> {new_drift:+.2f}s); stopping "
+                        "correction for this group."
+                    )
+                    abandoned[idx] = (old_drift, "no further rate change could improve it")
+
+            pending = still_pending
+
+        terminal: dict[int, tuple[float, str]] = {
+            idx: (drift, f"correction exhausted its {correction_passes}-pass bound")
+            for idx, (drift, _rate) in pending.items()
+        }
+        terminal.update(abandoned)
+        for idx, (drift, reason) in terminal.items():
+            logger.warning(f"Group {idx} left drifted {drift:+.2f}s; {reason}.")
 
     inputs: list[_Placement] = []
     for placements in placements_by_group:

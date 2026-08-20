@@ -7,7 +7,7 @@ from typing import Any
 from elevenlabs.client import ElevenLabs
 from elevenlabs.types.voice_settings import VoiceSettings
 
-from movie_subtitles.providers.base import Segment
+from movie_subtitles.providers.base import Segment, Word
 
 logger = logging.getLogger("elevenlabs")
 
@@ -88,7 +88,16 @@ class ScribeTranscribe:
             text = "".join(w.text for w in buffer).strip()
             if not text:
                 return None
-            segment = Segment(id=segment_id, start=buffer_start, end=buffer_end, text=text)
+            word_timings = [
+                Word(start=w.start, end=w.end, text=w.text) for w in buffer if w.type == "word"
+            ]
+            segment = Segment(
+                id=segment_id,
+                start=buffer_start,
+                end=buffer_end,
+                text=text,
+                words=word_timings or None,
+            )
             segment_id += 1
             return segment
 
@@ -96,14 +105,19 @@ class ScribeTranscribe:
             if word.type == "audio_event":
                 continue
 
-            if buffer_start is None:
-                buffer_start = word.start
+            if word.type == "word":
+                if buffer_start is None:
+                    buffer_start = word.start
+                buffer_end = word.end
 
             buffer.append(word)
-            buffer_end = word.end
 
             text_so_far = "".join(w.text for w in buffer).strip()
-            duration = buffer_end - buffer_start
+            duration = (
+                buffer_end - buffer_start
+                if buffer_start is not None and buffer_end is not None
+                else 0.0
+            )
             ends_sentence = word.type == "word" and text_so_far.endswith(_SENTENCE_END_CHARS)
             too_long = duration >= self.max_segment_seconds
             too_many_chars = len(text_so_far) >= self.max_segment_chars

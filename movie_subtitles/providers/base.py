@@ -4,12 +4,20 @@ from pathlib import Path
 from typing import Protocol
 
 
+@dataclass(frozen=True)
+class Word:
+    start: float
+    end: float
+    text: str
+
+
 @dataclass
 class Segment:
     id: int
     start: float
     end: float
     text: str
+    words: list[Word] | None = None
 
 
 class ASRProvider(Protocol):
