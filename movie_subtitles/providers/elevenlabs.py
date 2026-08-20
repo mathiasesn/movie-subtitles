@@ -171,3 +171,30 @@ class Speak:
                 audio_file.write(chunk)
 
         return out_path
+
+
+class Align:
+    """Forced-alignment wrapper backed by ElevenLabs' forced_alignment endpoint.
+
+    Given a synthesised TTS clip and the text it was generated from, this measures
+    where speech actually begins and ends inside the clip -- TTS output routinely
+    carries leading/trailing padding (silence, breath, etc.) that throws off
+    timing-slot fitting, so the caller can trim the clip to its real speech span.
+    """
+
+    def __init__(self, client: ElevenLabs | None = None) -> None:
+        self.client = client if client is not None else build_client()
+
+    def __call__(self, clip: Path, text: str) -> tuple[float, float]:
+        return self.align(clip, text)
+
+    def align(self, clip: Path, text: str) -> tuple[float, float]:
+        logger.debug(f"Aligning {clip} against {len(text)} chars of text")
+        with open(clip, "rb") as audio_file:
+            response = self.client.forced_alignment.create(file=audio_file, text=text)
+
+        words = getattr(response, "words", None)
+        if not words:
+            raise RuntimeError(f"Forced alignment response for {clip} has no usable word timings.")
+
+        return words[0].start, words[-1].end
