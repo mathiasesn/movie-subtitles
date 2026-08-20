@@ -1,6 +1,6 @@
 # movie-subtitles Architecture Documentation
 
-> Generated: 2026-08-19 · Branch: feat/elevenlabs (Stage 5 of `specs/elevenlabs-port.md`) · Version: 0.0.1
+> Generated: 2026-08-19 · Branch: main (`specs/scene-anchored-dub-alignment.md`) · Version: 0.1.1
 > Re-read this file at the start of any session touching this codebase. Update it when the architecture changes (new major dependency, restructured layer, changed convention).
 
 ## 1. How to Read This Document

@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 
 from movie_subtitles.ffmpeg import run as run_ffmpeg
-from movie_subtitles.providers.base import Segment, TTSProvider
+from movie_subtitles.providers.base import AlignmentProvider, Segment, TTSProvider
 
 logger = logging.getLogger("dub")
 
@@ -22,6 +22,10 @@ _DRIFT_TOLERANCE = 0.5
 # stay inaudible.
 _MIN_RATE = 0.9
 _MAX_RATE = 1.15
+
+# Tolerance, in seconds, for treating a silencedetect interval as touching a clip's edge
+# (leading/trailing padding) rather than sitting strictly inside it.
+_SILENCE_EPSILON = 0.05
 
 
 def _ideal_rate(actual_duration: float, slot_duration: float) -> float:
@@ -57,9 +61,6 @@ def _probe_duration(fpath: Path) -> float:
         text=True,
     )
     return float(result.stdout.strip())
-
-
-_SILENCE_EPSILON = 0.05
 
 
 def _parse_silence_intervals(stderr_text: str) -> list[tuple[float, float | None]]:
@@ -107,7 +108,7 @@ def _boundaries_from_intervals(
             break
 
     speech_end = duration
-    for start, end in intervals:
+    for start, end in reversed(intervals):
         if end is None or abs(end - duration) <= _SILENCE_EPSILON:
             speech_end = start
             break
@@ -126,10 +127,9 @@ def _detect_silence(fpath: Path, duration: float) -> tuple[float, float]:
     Internal (mid-sentence) pauses are detected too but must not be mistaken for padding --
     see `_boundaries_from_intervals`.
     """
-    result = subprocess.run(
+    stderr_text = run_ffmpeg(
         [
             "ffmpeg",
-            "-hide_banner",
             "-i",
             str(fpath),
             "-af",
@@ -138,29 +138,30 @@ def _detect_silence(fpath: Path, duration: float) -> tuple[float, float]:
             "null",
             "-",
         ],
-        capture_output=True,
-        text=True,
-        check=True,
+        what=f"Detecting silence in {fpath.name}",
+        capture_stderr=True,
     )
 
-    intervals = _parse_silence_intervals(result.stderr)
+    intervals = _parse_silence_intervals(stderr_text or "")
     return _boundaries_from_intervals(intervals, duration)
 
 
 def _measure_boundaries(
     clip_path: Path,
     text: str,
-    aligner,
+    aligner: AlignmentProvider | None,
     logged_sources: set[str],
 ) -> tuple[float, float]:
     """Measure real speech boundaries of a synthesised clip via a degrading chain.
 
     Forced Alignment (when `aligner` is given) -> ffmpeg `silencedetect` -> ffprobe
     container duration (no trim, logged as a warning). Any exception from `aligner`
-    degrades to the next tier. Each tier is logged only the first time it is used in
-    this run, not once per clip.
+    degrades to the next tier for this clip *and* latches the aligner off for the rest
+    of the run (via the "alignment_failed" marker in `logged_sources`) -- a broken
+    aligner would otherwise cost one failing API call per clip. Each tier is logged
+    only the first time it is used in this run, not once per clip.
     """
-    if aligner is not None:
+    if aligner is not None and "alignment_failed" not in logged_sources:
         try:
             speech_start, speech_end = aligner(clip_path, text)
             if "alignment" not in logged_sources:
@@ -195,8 +196,10 @@ def _measure_boundaries(
 def _group_segments(segments: list[Segment]) -> list[list[Segment]]:
     """Partition segments into anchor groups by inter-segment silence gap.
 
-    A new group starts whenever `segment.start - prev.end > _GAP_THRESHOLD`. Each
-    group's anchor is its first segment's start.
+    A new group starts whenever `segment.start - prev.end > _GAP_THRESHOLD`, computed
+    over the *full* segment list (including untranslated segments) so an untranslated
+    segment's span still counts toward the gap and cannot merge two scenes that should
+    stay separate. Each group's anchor is its first segment's start.
     """
     groups: list[list[Segment]] = []
     current: list[Segment] = []
@@ -215,24 +218,22 @@ def _synthesise_group(
     translations: dict[int, str],
     tts: TTSProvider,
     work_dir: Path,
-    aligner,
+    aligner: AlignmentProvider | None,
     logged_sources: set[str],
     rate: float,
-) -> tuple[list[tuple[Path, float, float]], float]:
+) -> list[tuple[Path, float, float]]:
     """Synthesise every segment in `group` at `rate` and measure its speech boundaries.
 
-    Returns (per-segment [(clip_path, speech_start, speech_end)], total speech length).
+    Returns per-segment [(clip_path, speech_start, speech_end)].
     """
     clips: list[tuple[Path, float, float]] = []
-    total_speech_len = 0.0
     for segment in group:
         text = translations[segment.id]
         clip_path = work_dir / f"segment_{segment.id:05d}.mp3"
         tts(text, clip_path, speed=rate)
         speech_start, speech_end = _measure_boundaries(clip_path, text, aligner, logged_sources)
         clips.append((clip_path, speech_start, speech_end))
-        total_speech_len += max(speech_end - speech_start, 0.0)
-    return clips, total_speech_len
+    return clips
 
 
 def _layout_group(
@@ -273,7 +274,7 @@ def synthesise_track(
     out_path: Path,
     work_dir: Path | None = None,
     *,
-    aligner=None,
+    aligner: AlignmentProvider | None = None,
 ) -> Path:
     """Synthesise translated segments and assemble them onto a silent timeline.
 
@@ -292,8 +293,12 @@ def synthesise_track(
         work_dir = Path(tempfile.mkdtemp(prefix="movie-subtitles-dub-"))
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    translated_segments = [s for s in segments if translations.get(s.id)]
-    groups = _group_segments(translated_segments)
+    raw_groups = _group_segments(segments)
+    groups = []
+    for raw_group in raw_groups:
+        translated_group = [s for s in raw_group if translations.get(s.id)]
+        if translated_group:
+            groups.append(translated_group)
     logged_sources: set[str] = set()
 
     inputs: list[tuple[float, Path, float, float]] = []
@@ -302,7 +307,7 @@ def synthesise_track(
         group_source_end = group[-1].end
         group_source_span = max(group_source_end - anchor, 0.0)
 
-        clips, _ = _synthesise_group(
+        clips = _synthesise_group(
             group, translations, tts, work_dir, aligner, logged_sources, rate=1.0
         )
         placements, placed_end = _layout_group(group, clips, anchor, group_source_end)
@@ -315,7 +320,7 @@ def synthesise_track(
                 f"Group {group_idx} ({len(group)} segment(s)) drifted {drift:+.2f}s past its "
                 f"source span; re-synthesising once at a shared rate of {shared_rate:.2f}x."
             )
-            clips, _ = _synthesise_group(
+            clips = _synthesise_group(
                 group,
                 translations,
                 tts,

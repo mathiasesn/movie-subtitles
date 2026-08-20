@@ -22,3 +22,7 @@ class TranslationProvider(Protocol):
 
 class TTSProvider(Protocol):
     def __call__(self, text: str, out_path: Path, speed: float = 1.0) -> Path: ...
+
+
+class AlignmentProvider(Protocol):
+    def __call__(self, clip: Path, text: str) -> tuple[float, float]: ...

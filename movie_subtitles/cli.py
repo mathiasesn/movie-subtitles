@@ -8,7 +8,13 @@ from pathlib import Path
 from dotenv import find_dotenv, load_dotenv
 from tqdm.auto import tqdm
 
-from movie_subtitles.providers.base import ASRProvider, Segment, TranslationProvider, TTSProvider
+from movie_subtitles.providers.base import (
+    AlignmentProvider,
+    ASRProvider,
+    Segment,
+    TranslationProvider,
+    TTSProvider,
+)
 from movie_subtitles.srt import format_block
 
 logger = logging.getLogger("cli")
@@ -194,7 +200,7 @@ def _check_ffmpeg_tools() -> None:
         )
 
 
-def _build_aligner():
+def _build_aligner() -> AlignmentProvider | None:
     """Build a Forced Alignment aligner for speech-boundary measurement, if usable.
 
     Forced Alignment is a nice-to-have, not a hard requirement for --dub: a
