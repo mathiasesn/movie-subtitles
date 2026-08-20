@@ -1,7 +1,7 @@
 import logging
 import tempfile
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -172,6 +172,32 @@ def _submit_group(
     ]
 
 
+def _resolve(futures: list[Future]) -> None:
+    """Wait for `futures` to finish, failing fast on the first exception.
+
+    Shared by both synthesis phases so their abort behaviour cannot drift. Waits with
+    `FIRST_EXCEPTION`; on a failure, cancels every future in the batch (a no-op on any
+    task that has already started, so this only cancels the still-queued tail), logs a
+    WARNING reporting how many of the batch completed vs. were cancelled, and re-raises
+    the original exception instance. The caller's own `.result()` collection afterwards
+    is then guaranteed not to block and not to raise. On success, returns normally and
+    leaves every future's `.result()` ready to collect.
+    """
+    done, _ = wait(futures, return_when=FIRST_EXCEPTION)
+
+    failure = next((future for future in done if future.exception() is not None), None)
+    if failure is None:
+        return
+
+    cancelled = sum(1 for future in futures if future.cancel())
+    completed = sum(1 for future in futures if future.done() and not future.cancelled())
+    logger.warning(
+        f"Dub synthesis task failed: {completed} of {len(futures)} segment(s) completed, "
+        f"{cancelled} cancelled before starting."
+    )
+    raise failure.exception()
+
+
 def _layout_group(
     group: list[Segment],
     clips: list[_Clip],
@@ -224,8 +250,11 @@ def synthesise_track(
     `max_workers`) in two flat batches, independent of group boundaries: phase A submits
     every translated segment of every group at 1.0x, each task synthesising with `tts` and
     then measuring with `aligner` (a `(clip: Path, text: str) -> (speech_start,
-    speech_end)` callable, e.g. `FallbackAlign`). Results are collected by submission
-    index, so the outcome does not depend on completion order. A purely arithmetic layout
+    speech_end)` callable, e.g. `FallbackAlign`). Each phase fails fast: if any task in the
+    batch raises, no not-yet-started task in that batch is started (see `_resolve`), and
+    the original exception propagates to the caller after up to `max_workers` already-
+    running tasks finish. Results are otherwise collected by submission index, so a
+    successful outcome does not depend on completion order. A purely arithmetic layout
     pass then walks the groups in order computing drift and, for any group past
     `_DRIFT_TOLERANCE`, its shared corrective rate. Phase B is a second flat batch,
     resynthesising only the segments of drifted groups at their group's rate; those groups
@@ -250,6 +279,7 @@ def synthesise_track(
             _submit_group(executor, group, translations, tts, aligner, work_dir, 1.0)
             for group in groups
         ]
+        _resolve([future for futures in phase_a_futures for future in futures])
         phase_a_clips = [[future.result() for future in futures] for futures in phase_a_futures]
 
         # Layout pass (pure arithmetic): compute placements/drift and decide which groups
@@ -281,6 +311,7 @@ def synthesise_track(
             idx: _submit_group(executor, groups[idx], translations, tts, aligner, work_dir, rate)
             for idx, rate in correction_rates.items()
         }
+        _resolve([future for futures in phase_b_futures.values() for future in futures])
         phase_b_clips = {
             idx: [future.result() for future in futures] for idx, futures in phase_b_futures.items()
         }
