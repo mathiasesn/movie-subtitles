@@ -1,4 +1,5 @@
 import logging
+import os
 import shutil
 import subprocess
 from argparse import ArgumentParser
@@ -193,6 +194,33 @@ def _check_ffmpeg_tools() -> None:
         )
 
 
+def _build_aligner():
+    """Build a Forced Alignment aligner for speech-boundary measurement, if usable.
+
+    Forced Alignment is a nice-to-have, not a hard requirement for --dub: a
+    --tts-engine openai user may have no ELEVENLABS_API_KEY at all. So any failure
+    here (missing key, client construction error) is caught and logged, degrading to
+    dub.py's ffmpeg silencedetect fallback (aligner=None) rather than propagating.
+    """
+    if not os.environ.get("ELEVENLABS_API_KEY"):
+        logger.info(
+            "ELEVENLABS_API_KEY not set: speech-boundary measurement will fall back to "
+            "ffmpeg silencedetect instead of Forced Alignment."
+        )
+        return None
+
+    from movie_subtitles.providers.elevenlabs import Align
+
+    try:
+        return Align()
+    except Exception as exc:
+        logger.warning(
+            f"Could not build the Forced Alignment aligner ({exc}); speech-boundary "
+            "measurement will fall back to ffmpeg silencedetect."
+        )
+        return None
+
+
 def _dub_and_mux(
     fpath: Path,
     segments: list[Segment],
@@ -203,8 +231,9 @@ def _dub_and_mux(
     from movie_subtitles.mux import mux_dub
 
     audio_track = fpath.with_name(f"{fpath.stem}.dub_audio.mp3")
+    aligner = _build_aligner()
 
-    synthesise_track(segments, translations, tts, audio_track)
+    synthesise_track(segments, translations, tts, audio_track, aligner=aligner)
 
     dubbed_path = mux_dub(fpath, audio_track)
     logger.info(f"Saved dubbed video to {dubbed_path}")
