@@ -27,8 +27,12 @@ _MIN_RATE = 0.9
 _MAX_RATE = 1.15
 
 # Default bound on how many TTS/alignment calls may be in flight at once. Threaded through
-# from --dub-workers; a value of 1 reproduces today's serial behaviour exactly.
-_MAX_WORKERS = 8
+# from --dub-workers. The default is 1 -- fully serial -- because vendor concurrency caps
+# are per-subscription and low: an ElevenLabs plan permitting 3 concurrent requests 429s
+# immediately at 8 workers, and the retry cannot help, since every worker backs off in
+# lockstep and re-collides. Concurrency is therefore opt-in: raise it to whatever the
+# resolved TTS vendor's plan actually allows.
+_MAX_WORKERS = 1
 
 # Bounded retry around the TTS call: up to this many attempts, with an exponential
 # 2**(attempt-1) second backoff between them (1s, 2s, ...).

@@ -103,7 +103,7 @@ def create_subtitles(
     dub: bool = False,
     managed: bool = False,
     tts_engine: str | None = None,
-    dub_workers: int = 8,
+    dub_workers: int = 1,
 ) -> None:
     if isinstance(fpath, str):
         fpath = Path(fpath)
@@ -367,11 +367,11 @@ def main() -> None:
     parser.add_argument(
         "--dub-workers",
         type=_positive_int,
-        default=8,
+        default=1,
         help=(
             "Maximum number of TTS/alignment calls to run concurrently during --dub "
-            "synthesis. 1 restores serial behaviour, the escape hatch for vendor rate "
-            "limits"
+            "synthesis. Defaults to 1 (serial), since vendor concurrency caps are "
+            "per-subscription and low -- raise it to what your TTS plan allows"
         ),
     )
     parser.add_argument(
