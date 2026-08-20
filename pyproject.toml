@@ -21,6 +21,10 @@ dependencies = [
     # main() loads .env before building any provider, so the API keys can live in a
     # gitignored file instead of being exported into every shell.
     "python-dotenv",
+    # speaker-voice classifier: noise-robust F0 estimation via librosa's pyin.
+    "librosa",
+    # speaker-voice classifier: Praat-based formant tracking (F1/F2).
+    "praat-parselmouth",
 ]
 
 [project.urls]
