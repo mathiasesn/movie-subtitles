@@ -39,7 +39,7 @@ class FallbackAlign:
     (once per run, INFO) which provider it settled on and returns its result. Any exception
     from a provider latches that provider off for the rest of the run -- a broken aligner
     must not cost one failing call per clip -- logs that once (WARNING), and degrades to the
-    next provider. If every provider fails, re-raises the exception from the last one.
+    next provider. If every provider fails, raises `RuntimeError` chained from the last one.
     """
 
     def __init__(self, providers: list[AlignmentProvider]) -> None:

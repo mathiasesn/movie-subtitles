@@ -6,7 +6,7 @@ Guidance for AI coding agents working in this repository.
 
 ## What this project is
 
-`movie-subtitles` turns a video/audio file into a translated `.srt` file, and optionally into a dubbed video with a synthesised translated audio track. Engine values name vendors, not pipelines, and each stage is independently overridable: `--asr-engine {local,elevenlabs,openai}`, `--translation-engine {local,anthropic,openai}`, `--tts-engine {elevenlabs,openai}`. `--asr-engine openai` has a confirmed vendor limitation: `whisper-1`'s segment timestamps degrade to uniform 1.000s spans on music-heavy or dialogue-sparse audio (observed on a movie trailer; see the `OpenAITranscribe` docstring and `specs/fix-smoke-run-findings.md`), which corrupts both `.srt` cue timings and dub slots. Prefer `--asr-engine elevenlabs` on such material. `--engine {local,elevenlabs,openai}` is a shorthand that sets all three when the per-stage flags are not given — `local` is faster-whisper ASR → local MADLAD400 T5 translation, fully offline; `openai` is OpenAI ASR → OpenAI chat-completions translation → OpenAI TTS; `--engine elevenlabs` alone raises `ValueError`, since ElevenLabs has no standalone text-translation endpoint — `--translation-engine {anthropic,openai,local}` must be passed explicitly alongside it. `--dub` synthesises the translated segments with the resolved TTS provider, lays them out on a scene-anchored timeline, and muxes them over the source video with ffmpeg (rejected if the resolved TTS engine is unusable, e.g. `local` — a hard error; a translation stage resolving to `local` under `--dub` is milder, only warning and proceeding). `--managed` bypasses this repo's pipeline entirely and calls the ElevenLabs Dubbing job API (create/poll/download) instead.
+`movie-subtitles` turns a video/audio file into a translated `.srt` file, and optionally into a dubbed video with a synthesised translated audio track. Engine values name vendors, not pipelines, and each stage is independently overridable: `--asr-engine {local,elevenlabs,openai}`, `--translation-engine {local,anthropic,openai}`, `--tts-engine {elevenlabs,openai}`. `--asr-engine openai` has a confirmed vendor limitation: `whisper-1`'s segment timestamps degrade to uniform 1.000s spans on music-heavy or dialogue-sparse audio (observed on a movie trailer; see the `OpenAITranscribe` docstring and `specs/fix-smoke-run-findings.md`), which corrupts both `.srt` cue timings and dub slots. Prefer `--asr-engine elevenlabs` on such material. `--engine {local,elevenlabs,openai}` is a shorthand that sets all three when the per-stage flags are not given — `local` is faster-whisper ASR → local MADLAD400 T5 translation, fully offline; `openai` is OpenAI ASR → OpenAI chat-completions translation → OpenAI TTS; `--engine elevenlabs` alone raises `ValueError`, since ElevenLabs has no standalone text-translation endpoint — `--translation-engine {anthropic,openai,local}` must be passed explicitly alongside it. `--dub` synthesises the translated segments with the resolved TTS provider, lays them out on a scene-anchored timeline, and muxes them over the source video with ffmpeg (rejected if the resolved TTS engine is unusable, e.g. `local` — a hard error; a translation stage resolving to `local` under `--dub` is milder, only warning and proceeding). Synthesis runs concurrently over a bounded `ThreadPoolExecutor` (`--dub-workers`, default 8; `1` reproduces the old serial behaviour). `--managed` bypasses this repo's pipeline entirely and calls the ElevenLabs Dubbing job API (create/poll/download) instead.
 
 Note: the original README advertised burned-in per-frame subtitles. That was never implemented and has been removed from the README — `.srt`, and with `--dub`/`--managed` a dubbed video, are the only output paths.
 
@@ -20,8 +20,10 @@ movie_subtitles/
   srt.py           # segment -> SRT block formatting, provider-agnostic
   dub.py           # scene-anchored TTS synthesis: groups segments by inter-segment
                     # silence gap, floats each group from its anchor, corrective rate
-                    # re-synthesis on drift, speech-span measurement + silent-timeline
-                    # assembly via ffmpeg
+                    # re-synthesis on drift, runs phase A/phase B over a bounded
+                    # ThreadPoolExecutor (--dub-workers), and assembles the silent
+                    # timeline via ffmpeg; boundary measurement itself lives in
+                    # providers/ffmpeg_align.py + providers/base.py, not here
   mux.py           # mux_dub(): overlays the finished audio track over the source video
                     # with ffmpeg, replacing (not mixing with) the original audio track
   ffmpeg.py         # audio_codec_for() container->codec table + run(): the one place that
@@ -30,10 +32,13 @@ movie_subtitles/
   dubbing.py        # ManagedDub: the --managed path, independent of the rest
   providers/
     base.py          # Segment dataclass + ASRProvider / TranslationProvider /
-                      # TTSProvider Protocols
+                      # TTSProvider Protocols + FallbackAlign, which composes
+                      # AlignmentProviders into a thread-safe degrade chain
     local.py          # Transcribe (faster-whisper) + Translate (MADLAD400 T5)
     elevenlabs.py      # ScribeTranscribe (ASR) + Speak (TTS) + Align (Forced Alignment,
-                       # used by dub.py for speech-span measurement); shared build_client()
+                       # the first tier of the alignment chain); shared build_client()
+    ffmpeg_align.py     # SilenceAlign (ffmpeg silencedetect) + DurationAlign (ffprobe
+                        # duration, no-trim last resort); no vendor SDK imports
     llm.py             # LLMTranslate: Claude-backed TranslationProvider
     openai_.py          # OpenAITranscribe (ASR) + OpenAITranslate + OpenAISpeak (TTS);
                          # shared build_client(); trailing underscore avoids shadowing
@@ -61,6 +66,7 @@ CI (`.github/workflows/ci.yml`) runs those two ruff checks and nothing else — 
 - **Model/API wrappers are callable classes.** Load the model/client in `__init__`, expose a named method (`transcribe` / `translate` / `speak` / `dub`), and have `__call__` delegate to it. New backends follow the same shape.
 - **Orchestration lives only in `cli.py`.** Providers know nothing about each other, about SRT, or about dubbing.
 - **Providers implement Protocols (`providers/base.py`), not base classes.** `_build_asr_provider`/`_build_translation_provider`/`_build_tts_provider` in `cli.py` are the only places that pick a concrete class per engine; `_build_providers()` wraps the first two for the stages every invocation needs.
+- **Speech-boundary measurement is a degrade chain, not a single call.** `cli.py:_build_aligner()` always returns an `AlignmentProvider` (never `None`): it assembles `providers/base.py:FallbackAlign([Align()?, SilenceAlign(), DurationAlign()])`, omitting `Align()` when `ELEVENLABS_API_KEY` is unset or construction fails. `FallbackAlign` tries each tier in order, latches a failing one off for the rest of the run, and raises `RuntimeError` only once every tier is exhausted. `dub.py`'s `synthesise_track(..., *, aligner: AlignmentProvider, max_workers: int = 8)` requires `aligner` — it no longer measures boundaries itself.
 - **Provider modules are imported lazily, inside `cli.py`'s builders.** Each provider module imports its own vendor SDK at module top level, but `cli.py`'s `_build_asr_provider`/`_build_translation_provider`/`_build_tts_provider` import the provider module itself only inside the branch that needs it — this is what lets `--engine local` run without importing the ElevenLabs/Anthropic/OpenAI SDKs, and vice versa.
 - **Defaults are duplicated** between class `__init__` signatures and argparse. Change both together.
 - **Do not reorder `create_subtitles()` parameters** — `main()` passes the first five positionally. New params are keyword-only, appended at the end.
