@@ -483,6 +483,11 @@ def synthesise_track(
         # 1.0x.
         applied_rate: dict[int, float] = dict.fromkeys(drift_by_group, 1.0)
 
+        # Groups the loop gave up on (saturated rate, or a pass that failed to
+        # improve), with the residual drift they were left at, so every abandoned
+        # group reaches the terminal WARNING below rather than only an INFO line.
+        abandoned: dict[int, float] = {}
+
         for pass_num in range(1, correction_passes + 1):
             if not drift_by_group:
                 break
@@ -492,15 +497,23 @@ def synthesise_track(
                 current_rate = applied_rate[idx]
                 rate = _corrective_rate(idx, groups[idx], current_rate, drift, clips_by_group[idx])
                 if rate == current_rate:
-                    # The clamp has saturated: the newly-computed rate is identical to the
-                    # one already applied, so resynthesising would pay for identical audio.
-                    # Distinct from "did not reduce drift" below -- this group is not even
-                    # attempted this pass.
+                    # The newly-composed rate is identical to the one already applied, so
+                    # resynthesising would pay for byte-identical audio. Usually the clamp
+                    # saturating, but not always -- `_required_rate` also returns exactly
+                    # 1.0 for a non-positive span -- so only say "clamp" when the rate
+                    # actually sits on a bound. Distinct from "did not reduce drift" below:
+                    # this group is not even attempted this pass.
+                    reason = (
+                        "clamp saturated"
+                        if rate in (_MIN_RATE, _MAX_RATE)
+                        else "no further adjustment implied"
+                    )
                     logger.info(
                         f"Group {idx} pass {pass_num}/{correction_passes}: composed rate "
-                        f"{rate:.2f}x is unchanged from the already-applied rate (clamp "
-                        "saturated); skipping re-synthesis for this group."
+                        f"{rate:.2f}x is unchanged from the already-applied rate "
+                        f"({reason}); skipping re-synthesis for this group."
                     )
+                    abandoned[idx] = drift
                 else:
                     rates[idx] = rate
 
@@ -543,16 +556,21 @@ def synthesise_track(
                         f"drift ({old_drift:+.2f}s -> {new_drift:+.2f}s); stopping "
                         "correction for this group."
                     )
+                    abandoned[idx] = old_drift
                     del applied_rate[idx]
 
             drift_by_group = still_drifted
 
-        if drift_by_group:
-            for idx, drift in drift_by_group.items():
-                logger.warning(
-                    f"Group {idx} still drifted {drift:+.2f}s after "
-                    f"{correction_passes} correction pass(es)."
-                )
+        for idx, drift in drift_by_group.items():
+            logger.warning(
+                f"Group {idx} still drifted {drift:+.2f}s after "
+                f"{correction_passes} correction pass(es)."
+            )
+        for idx, drift in abandoned.items():
+            logger.warning(
+                f"Group {idx} left drifted {drift:+.2f}s; correction stopped early because "
+                "no further rate change could improve it."
+            )
 
     inputs: list[_Placement] = []
     for placements in placements_by_group:
