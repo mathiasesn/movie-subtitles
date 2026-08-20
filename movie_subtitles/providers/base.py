@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-logger = logging.getLogger("providers.base")
+logger = logging.getLogger("base")
 
 
 @dataclass

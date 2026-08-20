@@ -243,7 +243,7 @@ def _dub_and_mux(
     segments: list[Segment],
     translations: dict[int, str],
     tts: TTSProvider,
-    dub_workers: int = 8,
+    dub_workers: int,
 ) -> None:
     from movie_subtitles.dub import synthesise_track
     from movie_subtitles.mux import mux_dub
