@@ -165,6 +165,7 @@ def create_subtitles(
     dub_segments: list[Segment] = []
     dub_translations: dict[int, str] = {}
     cue_id = 0
+
     # One-segment lookahead: a cue's padded end must not overlap the next emitted
     # cue's start, but that start is only known once the following segment arrives.
     # `pending` holds the most recently emitted (not-yet-written) cue's data, and is
@@ -172,6 +173,11 @@ def create_subtitles(
     # the end of the stream). This keeps `segments` a single lazy pass -- no
     # materializing it into a list -- so ASR inference and the progress bar still
     # drive off the same generator.
+    def _flush_pending(pending: tuple[int, float, float, str], next_start: float | None) -> None:
+        """Format and append `pending`'s cue, padding its end toward `next_start`."""
+        p_id, p_start, p_end, p_text = pending
+        srt_lines.append(format_block(p_id, p_start, pad_cue_end(p_end, next_start), p_text))
+
     pending: tuple[int, float, float, str] | None = None
     for segment in tqdm(segments, desc="Writing to srt file"):
         budget_chars = _budget_chars(segment.start, segment.end)
@@ -182,8 +188,7 @@ def create_subtitles(
         cue_id += 1
 
         if pending is not None:
-            p_id, p_start, p_end, p_text = pending
-            srt_lines.append(format_block(p_id, p_start, pad_cue_end(p_end, segment.start), p_text))
+            _flush_pending(pending, segment.start)
         pending = (cue_id, segment.start, segment.end, text)
 
         if dub:
@@ -191,8 +196,7 @@ def create_subtitles(
             dub_translations[segment.id] = text
 
     if pending is not None:
-        p_id, p_start, p_end, p_text = pending
-        srt_lines.append(format_block(p_id, p_start, pad_cue_end(p_end, None), p_text))
+        _flush_pending(pending, None)
 
     srt_file.write_text("".join(srt_lines), encoding="utf-8")
     logger.info(f"Saved srt file to {srt_file}")
