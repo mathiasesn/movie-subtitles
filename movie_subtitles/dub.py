@@ -1,6 +1,7 @@
 import logging
 import tempfile
 import time
+from collections.abc import Iterable
 from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
@@ -172,44 +173,36 @@ def _submit_group(
     ]
 
 
-def _resolve(futures: list[Future[_Clip]]) -> None:
-    """Wait for `futures` to finish, failing fast on the first exception.
+def _resolve(batches: Iterable[list[Future[_Clip]]]) -> list[list[_Clip]]:
+    """Wait for every future in `batches`, failing fast, and return their clips per batch.
 
-    Shared by both synthesis phases so their abort behaviour cannot drift. Waits with
-    `FIRST_EXCEPTION`; on a failure, cancels every future in the batch (a no-op on any
-    task that has already started, so this only cancels the still-queued tail), logs a
-    WARNING naming every category of the batch's spend, and re-raises the original
-    exception instance. The caller's own `.result()` collection afterwards is then
-    guaranteed not to block and not to raise. On success, returns normally and leaves
-    every future's `.result()` ready to collect.
+    Shared by both synthesis phases so their abort behaviour cannot drift, and the only
+    way to get at the clips -- collecting results without first waiting is therefore not
+    expressible. Waits with `FIRST_EXCEPTION`; on a failure, cancels every future in the
+    batch (a no-op on any task that has already started, so only the still-queued tail is
+    dropped), logs a WARNING accounting for each category of the batch, and re-raises the
+    original exception instance. Already-running tasks are left to finish by the caller's
+    pool shutdown, so no worker outlives the exception.
     """
+    grouped = list(batches)
+    futures = [future for batch in grouped for future in batch]
     done, _ = wait(futures, return_when=FIRST_EXCEPTION)
 
-    failure = next((future for future in done if future.exception() is not None), None)
-    if failure is None:
-        return
+    # Classified from `done` alone: it is an immutable snapshot taken by `wait`, so every
+    # count below describes the same instant, and `.exception()` on its members never
+    # blocks. Anything outside it was still running when the failure was detected.
+    failures = [future for future in done if future.exception() is not None]
+    if failures:
+        cancelled = sum(1 for future in futures if future.cancel())
+        logger.warning(
+            f"Dub synthesis task failed: {len(done) - len(failures)} succeeded, "
+            f"{len(failures)} failed, {cancelled} cancelled before starting, "
+            f"{len(futures) - len(done) - cancelled} still in flight and will finish "
+            f"before the abort completes, out of {len(futures)} segment(s)."
+        )
+        raise failures[0].exception()
 
-    cancelled = sum(1 for future in futures if future.cancel())
-    succeeded = sum(
-        1
-        for future in futures
-        if future.done() and not future.cancelled() and future.exception() is None
-    )
-    failed = sum(
-        1
-        for future in futures
-        if future.done() and not future.cancelled() and future.exception() is not None
-    )
-    # The remainder are already-running tasks that were neither cancellable nor done at
-    # the moment of failure; they will still run to completion (and be billed) during the
-    # pool's subsequent shutdown(wait=True), so name them rather than let them go uncounted.
-    in_flight = len(futures) - cancelled - succeeded - failed
-    logger.warning(
-        f"Dub synthesis task failed: {succeeded} succeeded, {failed} failed, {cancelled} "
-        f"cancelled before starting, {in_flight} still in flight and will complete (and be billed) "
-        f"before abort, out of {len(futures)} segment(s)."
-    )
-    raise failure.exception()
+    return [[future.result() for future in batch] for batch in grouped]
 
 
 def _layout_group(
@@ -293,8 +286,7 @@ def synthesise_track(
             _submit_group(executor, group, translations, tts, aligner, work_dir, 1.0)
             for group in groups
         ]
-        _resolve([future for futures in phase_a_futures for future in futures])
-        phase_a_clips = [[future.result() for future in futures] for futures in phase_a_futures]
+        phase_a_clips = _resolve(phase_a_futures)
 
         # Layout pass (pure arithmetic): compute placements/drift and decide which groups
         # need a corrective re-synthesis, keyed by group index.
@@ -325,10 +317,7 @@ def synthesise_track(
             idx: _submit_group(executor, groups[idx], translations, tts, aligner, work_dir, rate)
             for idx, rate in correction_rates.items()
         }
-        _resolve([future for futures in phase_b_futures.values() for future in futures])
-        phase_b_clips = {
-            idx: [future.result() for future in futures] for idx, futures in phase_b_futures.items()
-        }
+        phase_b_clips = dict(zip(phase_b_futures, _resolve(phase_b_futures.values()), strict=True))
 
     for idx in sorted(phase_b_clips):
         placements, drift = _lay_out_and_drift(groups[idx], phase_b_clips[idx])
