@@ -71,6 +71,17 @@ class FallbackAlign:
                             boundaries = provider(clip, text)
                         except Exception as exc:
                             last_exc = exc
+                            # Latch off BEFORE marking settled: this order is what
+                            # actually holds the one-failing-call bound for a tier broken
+                            # from the start. A thread elsewhere in this method only
+                            # skips straight to the unserialised path once it observes
+                            # `settled=True`; latching off first guarantees no thread can
+                            # observe that without also seeing `disabled=True` (both
+                            # under `self._lock`), so it takes the `disabled` exit above
+                            # rather than making its own call to a tier we already know
+                            # is dead. Reversed, a thread could see `settled=True` while
+                            # `disabled` was still unset and slip through to call the
+                            # dead provider itself -- silently breaking the bound.
                             self._latch_off_once(index, provider, exc)
                             with self._lock:
                                 self._settled[index] = True

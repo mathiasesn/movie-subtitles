@@ -182,23 +182,35 @@ def _resolve(batches: Iterable[list[Future[_Clip]]]) -> list[list[_Clip]]:
     expressible. `batches` is flattened in full before waiting: on a failure, the abort
     cancels across every batch handed in, not just the one containing the failure (phase
     B passes every drifted group's batch at once). Waits with `FIRST_EXCEPTION`; on a
-    failure, the still-queued tail is cancelled first, then every future is classified in
-    one pass. The four counts (succeeded / failed / cancelled / in-flight) are mutually
-    exclusive and sum to the batch size, and nothing that has already completed by the
-    time of that pass can be reported as in-flight -- but "in-flight" is not a final
-    state: those tasks are still running and may finish before the WARNING below is even
-    emitted. Logs that WARNING accounting for each category of the batch and re-raises
-    the original exception instance from the lowest-submission-index failure among the
-    failures observed during this classification pass -- deterministic given that set,
-    but not a total order over every failure that could occur, since which failures are
-    visible depends on what else completed after `wait()` returned. Already-running tasks
-    are left to finish by the caller's pool shutdown, so no worker outlives the exception.
+    failure -- including a future in `done` that came back cancelled rather than failed,
+    which is treated as an abort just the same, even though nothing upstream cancels a
+    future before `_resolve()` sees it today -- the still-queued tail is cancelled first,
+    then every future is classified in one pass. The four counts (succeeded / failed /
+    cancelled / in-flight) are mutually exclusive and sum to the batch size, and nothing
+    that has already completed by the time of that pass can be reported as in-flight --
+    but "in-flight" is not a final state: those tasks are still running and may finish
+    before the WARNING below is even emitted. Logs that WARNING accounting for each
+    category of the batch and re-raises the original exception instance from the
+    lowest-submission-index failure among the failures observed during this
+    classification pass -- deterministic given that set, but not a total order over every
+    failure that could occur, since which failures are visible depends on what else
+    completed after `wait()` returned. If the abort was triggered only by a cancellation,
+    with no task having actually raised, raises `RuntimeError` instead (there is no
+    original exception to re-raise). Already-running tasks are left to finish by the
+    caller's pool shutdown, so no worker outlives the exception.
     """
     grouped = list(batches)
     futures = [future for batch in grouped for future in batch]
     done, _ = wait(futures, return_when=FIRST_EXCEPTION)
 
-    if any(not future.cancelled() and future.exception() is not None for future in done):
+    # `future.cancelled()` is checked first in both branches below, short-circuiting
+    # before `future.exception()` is ever called on a cancelled future -- calling it on
+    # one raises `CancelledError` instead of returning `None`. A cancelled future in
+    # `done` (nothing produces one today, but a future caller might) is itself treated as
+    # an abort, not silently skipped: falling through to `future.result()` for it would
+    # raise an unguarded `CancelledError`, which is a `BaseException` outside `main()`'s
+    # caught tuple and would surface as a bare traceback instead of a one-line message.
+    if any(future.cancelled() or future.exception() is not None for future in done):
         # Cancel the still-queued tail first; a future that already started or finished
         # by the time we get to it below returns False here and is classified from its
         # own (now final) state instead, so it can never land in the in-flight bucket.
@@ -226,7 +238,11 @@ def _resolve(batches: Iterable[list[Future[_Clip]]]) -> list[list[_Clip]]:
             f"{cancelled} cancelled before starting, {in_flight} still in flight and "
             f"will finish before the abort completes, out of {len(futures)} segment(s)."
         )
-        raise failures[min(failures)]
+        if failures:
+            raise failures[min(failures)]
+        raise RuntimeError(
+            "Dub synthesis batch aborted: a task was cancelled with no other task having raised."
+        )
 
     return [[future.result() for future in batch] for batch in grouped]
 
