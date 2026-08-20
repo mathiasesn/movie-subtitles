@@ -1,7 +1,7 @@
 import logging
 import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,10 +29,9 @@ _MAX_RATE = 1.15
 # from --dub-workers; a value of 1 reproduces today's serial behaviour exactly.
 _MAX_WORKERS = 8
 
-# Bounded retry around the TTS call: up to this many attempts, sleeping this many seconds
-# (exponential) between them.
+# Bounded retry around the TTS call: up to this many attempts, with an exponential
+# 2**(attempt-1) second backoff between them (1s, 2s, ...).
 _TTS_MAX_ATTEMPTS = 3
-_TTS_BACKOFF_SECONDS = (1, 2)
 
 
 @dataclass(frozen=True)
@@ -72,7 +71,7 @@ def fit_rate(actual_duration: float, slot_duration: float) -> float:
 def _tts_with_retry(tts: TTSProvider, text: str, clip_path: Path, rate: float) -> None:
     """Call `tts` with a provider-agnostic bounded retry.
 
-    Up to `_TTS_MAX_ATTEMPTS` attempts, sleeping `_TTS_BACKOFF_SECONDS` (exponential)
+    Up to `_TTS_MAX_ATTEMPTS` attempts, sleeping an exponential `2**(attempt-1)` seconds
     between them; the last exception is re-raised if every attempt fails. Catches plain
     `Exception` rather than a vendor 429 type so no vendor SDK needs importing into this
     module, and transient network blips get covered too. This wraps only the TTS call --
@@ -87,12 +86,25 @@ def _tts_with_retry(tts: TTSProvider, text: str, clip_path: Path, rate: float) -
         except Exception as exc:
             if attempt == _TTS_MAX_ATTEMPTS:
                 raise
-            backoff = _TTS_BACKOFF_SECONDS[attempt - 1]
+            backoff = 2 ** (attempt - 1)
             logger.warning(
                 f"TTS call for {clip_path.name} failed ({exc}); retrying in {backoff}s "
                 f"(attempt {attempt}/{_TTS_MAX_ATTEMPTS})."
             )
             time.sleep(backoff)
+
+
+def _lay_out_and_drift(group: list[Segment], clips: list[_Clip]) -> tuple[list[_Placement], float]:
+    """Lay `group` out from its own anchor and report its accumulated drift.
+
+    The group's anchor is its first segment's start and its source end is its last
+    segment's end, both derived here so the two callers (the phase-A layout pass and the
+    phase-B re-layout) cannot disagree. Drift is the placed end of the last clip measured
+    against the group's source end; positive means the group ran long.
+    """
+    group_source_end = group[-1].end
+    placements, placed_end = _layout_group(group, clips, group[0].start, group_source_end)
+    return placements, placed_end - group_source_end
 
 
 def _synthesise_and_measure(
@@ -131,6 +143,33 @@ def _group_segments(segments: list[Segment]) -> list[list[Segment]]:
     if current:
         groups.append(current)
     return groups
+
+
+def _submit_group(
+    executor: ThreadPoolExecutor,
+    group: list[Segment],
+    translations: dict[int, str],
+    tts: TTSProvider,
+    aligner: AlignmentProvider,
+    work_dir: Path,
+    rate: float,
+) -> list[Future[_Clip]]:
+    """Submit every segment of `group` to `executor` at `rate`, in group order.
+
+    Shared by both synthesis phases, so the unit-of-work signature is named once.
+    """
+    return [
+        executor.submit(
+            _synthesise_and_measure,
+            segment,
+            translations[segment.id],
+            tts,
+            aligner,
+            work_dir,
+            rate,
+        )
+        for segment in group
+    ]
 
 
 def _layout_group(
@@ -208,44 +247,24 @@ def synthesise_track(
     with ThreadPoolExecutor(max_workers=pool_size) as executor:
         # Phase A: one flat batch over every segment of every group at 1.0x.
         phase_a_futures = [
-            [
-                executor.submit(
-                    _synthesise_and_measure,
-                    segment,
-                    translations[segment.id],
-                    tts,
-                    aligner,
-                    work_dir,
-                    1.0,
-                )
-                for segment in group
-            ]
+            _submit_group(executor, group, translations, tts, aligner, work_dir, 1.0)
             for group in groups
         ]
         phase_a_clips = [[future.result() for future in futures] for futures in phase_a_futures]
 
         # Layout pass (pure arithmetic): compute placements/drift and decide which groups
-        # need a corrective re-synthesis.
-        anchors = [group[0].start for group in groups]
-        group_source_ends = [group[-1].end for group in groups]
-        placements_by_group: list[list[_Placement]] = [[] for _ in groups]
-        needs_correction: list[bool] = [False] * len(groups)
-        shared_rates: list[float] = [1.0] * len(groups)
+        # need a corrective re-synthesis, keyed by group index.
+        placements_by_group: list[list[_Placement]] = []
+        correction_rates: dict[int, float] = {}
 
         for idx, group in enumerate(groups):
-            placements, placed_end = _layout_group(
-                group, phase_a_clips[idx], anchors[idx], group_source_ends[idx]
-            )
-            placements_by_group[idx] = placements
-            drift = placed_end - group_source_ends[idx]
+            placements, drift = _lay_out_and_drift(group, phase_a_clips[idx])
+            placements_by_group.append(placements)
 
             if abs(drift) > _DRIFT_TOLERANCE:
                 group_speech_len = sum(placement.speech_len for placement in placements)
-                shared_rate = fit_rate(
-                    group_speech_len, max(group_source_ends[idx] - anchors[idx], 0.0)
-                )
-                shared_rates[idx] = shared_rate
-                needs_correction[idx] = True
+                shared_rate = fit_rate(group_speech_len, max(group[-1].end - group[0].start, 0.0))
+                correction_rates[idx] = shared_rate
                 logger.info(
                     f"Group {idx} ({len(group)} segment(s)) drifted {drift:+.2f}s past its "
                     f"source span; re-synthesising once at a shared rate of {shared_rate:.2f}x."
@@ -259,32 +278,16 @@ def synthesise_track(
         # Phase B: one flat batch over every segment of every drifted group, at that
         # group's shared rate.
         phase_b_futures = {
-            idx: [
-                executor.submit(
-                    _synthesise_and_measure,
-                    segment,
-                    translations[segment.id],
-                    tts,
-                    aligner,
-                    work_dir,
-                    shared_rates[idx],
-                )
-                for segment in groups[idx]
-            ]
-            for idx in range(len(groups))
-            if needs_correction[idx]
+            idx: _submit_group(executor, groups[idx], translations, tts, aligner, work_dir, rate)
+            for idx, rate in correction_rates.items()
         }
         phase_b_clips = {
             idx: [future.result() for future in futures] for idx, futures in phase_b_futures.items()
         }
 
     for idx in sorted(phase_b_clips):
-        group = groups[idx]
-        placements, placed_end = _layout_group(
-            group, phase_b_clips[idx], anchors[idx], group_source_ends[idx]
-        )
+        placements, drift = _lay_out_and_drift(groups[idx], phase_b_clips[idx])
         placements_by_group[idx] = placements
-        drift = placed_end - group_source_ends[idx]
         logger.info(f"Group {idx} corrected; residual drift {drift:+.2f}s.")
 
     inputs: list[_Placement] = []

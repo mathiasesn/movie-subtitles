@@ -65,21 +65,24 @@ class FallbackAlign:
                 boundaries = provider(clip, text)
             except Exception as exc:
                 last_exc = exc
+                # Logged inside the lock so the once-per-provider guard and the log call
+                # cannot interleave; the lock never spans a provider call, so concurrent
+                # measurement is not serialised.
                 with self._lock:
-                    already_disabled = index in self._disabled
-                    self._disabled.add(index)
-                if not already_disabled:
-                    logger.warning(
-                        f"{type(provider).__name__} unavailable ({exc}); falling back to "
-                        "the next speech-boundary measurement tier."
-                    )
+                    if index not in self._disabled:
+                        self._disabled.add(index)
+                        logger.warning(
+                            f"{type(provider).__name__} unavailable ({exc}); falling back "
+                            "to the next speech-boundary measurement tier."
+                        )
                 continue
 
             with self._lock:
-                already_logged = index in self._logged
-                self._logged.add(index)
-            if not already_logged:
-                logger.info(f"Measuring dub clip speech boundaries via {type(provider).__name__}.")
+                if index not in self._logged:
+                    self._logged.add(index)
+                    logger.info(
+                        f"Measuring dub clip speech boundaries via {type(provider).__name__}."
+                    )
             return boundaries
 
         raise RuntimeError(

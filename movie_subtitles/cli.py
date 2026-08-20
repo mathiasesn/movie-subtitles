@@ -232,8 +232,7 @@ def _build_aligner() -> AlignmentProvider:
                 "measurement will fall back to ffmpeg silencedetect."
             )
 
-    providers.append(SilenceAlign())
-    providers.append(DurationAlign())
+    providers.extend((SilenceAlign(), DurationAlign()))
 
     return FallbackAlign(providers)
 
