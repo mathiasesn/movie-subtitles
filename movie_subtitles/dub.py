@@ -83,7 +83,9 @@ def _required_rate(actual_duration: float, slot_duration: float) -> float:
     return actual_duration / slot_duration
 
 
-def _tts_with_retry(tts: TTSProvider, text: str, clip_path: Path, rate: float) -> None:
+def _tts_with_retry(
+    tts: TTSProvider, text: str, clip_path: Path, rate: float, voice: str | None
+) -> None:
     """Call `tts` with a provider-agnostic bounded retry.
 
     Up to `_TTS_MAX_ATTEMPTS` attempts, sleeping an exponential `2**(attempt-1)` seconds
@@ -93,10 +95,14 @@ def _tts_with_retry(tts: TTSProvider, text: str, clip_path: Path, rate: float) -
     NOT the aligner call, which is handled separately (see `_synthesise_and_measure`): an
     aligner exception is an intended degrade signal that `FallbackAlign` acts on by moving
     to the next tier and latching the failed one off, so retrying it here would fight that.
+
+    `voice` is passed straight through to every attempt unchanged -- retrying never
+    substitutes a different voice for the one the caller resolved. `None` reaches the
+    provider as-is, which is what makes it use its own configured default.
     """
     for attempt in range(1, _TTS_MAX_ATTEMPTS + 1):
         try:
-            tts(text, clip_path, speed=rate)
+            tts(text, clip_path, speed=rate, voice=voice)
             return
         except Exception as exc:
             if attempt == _TTS_MAX_ATTEMPTS:
@@ -165,6 +171,7 @@ def _synthesise_and_measure(
     work_dir: Path,
     rate: float,
     pass_num: int,
+    voice: str | None,
 ) -> _Clip:
     """Synthesise one segment at `rate` for correction pass `pass_num` and measure its
     speech boundaries.
@@ -176,9 +183,14 @@ def _synthesise_and_measure(
     repeated 0.90x), which would collide on a rate-keyed name. Every `_Clip` this returns
     therefore always points at the exact audio it was measured from, even if a later pass
     is rejected and an earlier pass's `_Clip` is what the caller keeps.
+
+    `voice` is the voice id resolved for this segment's speaker (or `None` for "use the
+    provider's configured default"), threaded straight through to `_tts_with_retry` --
+    it does not affect the on-disk path, since a segment's speaker (and therefore its
+    voice) does not change across correction passes.
     """
     clip_path = work_dir / f"segment_{segment.id:05d}_p{pass_num:02d}.mp3"
-    _tts_with_retry(tts, text, clip_path, rate)
+    _tts_with_retry(tts, text, clip_path, rate, voice)
     speech_start, speech_end = aligner(clip_path, text)
     return _Clip(clip_path, speech_start, speech_end)
 
@@ -241,6 +253,7 @@ def _submit_group(
     work_dir: Path,
     rate: float,
     pass_num: int,
+    voices: dict[str | None, str | None] | None,
 ) -> list[Future[_Clip]]:
     """Submit every segment of `group` to `executor` at `rate` for pass `pass_num`, in
     group order.
@@ -248,7 +261,11 @@ def _submit_group(
     Shared by the initial pass and every correction pass, so the unit-of-work signature is
     named once. `pass_num` (0 for the initial pass, 1.. for each correction pass) is
     threaded through to `_synthesise_and_measure` so each pass writes to its own on-disk
-    path instead of overwriting a previous pass's file.
+    path instead of overwriting a previous pass's file. `voices` maps speaker label -> voice
+    id; each segment looks up its own `voices.get(segment.speaker)` here rather than the
+    caller resolving one voice per group, since a group can span more than one speaker.
+    `voices=None` (or a segment whose speaker has no entry) resolves to `None`, which is
+    "no voice specified" all the way down to the provider.
     """
     return [
         executor.submit(
@@ -260,6 +277,7 @@ def _submit_group(
             work_dir,
             rate,
             pass_num,
+            voices.get(segment.speaker) if voices is not None else None,
         )
         for segment in group
     ]
@@ -406,6 +424,7 @@ def synthesise_track(
     aligner: AlignmentProvider,
     max_workers: int = _MAX_WORKERS,
     correction_passes: int = _MAX_CORRECTION_PASSES,
+    voices: dict[str | None, str | None] | None = None,
 ) -> Path:
     """Synthesise translated segments and assemble them onto a silent timeline.
 
@@ -448,6 +467,15 @@ def synthesise_track(
     completion order. Per-group log lines are emitted from the layout passes, in group
     order, so they never interleave with synthesis. Produces one continuous audio file at
     `out_path`. Returns `out_path`.
+
+    `voices` maps speaker label -> voice id and is threaded down through `_submit_group` to
+    every `tts(...)` call, initial pass and every correction pass alike, via
+    `voices.get(segment.speaker)`; a segment's voice therefore never changes across passes,
+    only its rate does. `voices=None` (the default) or a speaker missing from the mapping
+    resolves to `voice=None`, which reaches the provider unchanged and makes it fall back
+    to its own configured default -- so callers that never pass `voices` see byte-for-byte
+    today's single-voice behaviour. This has no bearing on timing, grouping, drift or the
+    correction loop, all of which operate purely on `Segment`/`_Clip` timestamps.
     """
     if work_dir is None:
         work_dir = Path(tempfile.mkdtemp(prefix="movie-subtitles-dub-"))
@@ -462,7 +490,7 @@ def synthesise_track(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Initial pass: one flat batch over every segment of every group at 1.0x.
         initial_futures = [
-            _submit_group(executor, group, translations, tts, aligner, work_dir, 1.0, 0)
+            _submit_group(executor, group, translations, tts, aligner, work_dir, 1.0, 0, voices)
             for group in groups
         ]
         clips_by_group: dict[int, list[_Clip]] = dict(enumerate(_resolve(initial_futures)))
@@ -540,7 +568,15 @@ def synthesise_track(
 
             pass_futures = {
                 idx: _submit_group(
-                    executor, groups[idx], translations, tts, aligner, work_dir, rate, pass_num
+                    executor,
+                    groups[idx],
+                    translations,
+                    tts,
+                    aligner,
+                    work_dir,
+                    rate,
+                    pass_num,
+                    voices,
                 )
                 for idx, rate in rates.items()
             }
