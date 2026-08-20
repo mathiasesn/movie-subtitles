@@ -1,6 +1,7 @@
 import logging
-import re
 import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,13 +25,14 @@ _DRIFT_TOLERANCE = 0.5
 _MIN_RATE = 0.9
 _MAX_RATE = 1.15
 
-# Tolerance, in seconds, for treating a silencedetect interval as touching a clip's edge
-# (leading/trailing padding) rather than sitting strictly inside it.
-_SILENCE_EPSILON = 0.05
+# Default bound on how many TTS/alignment calls may be in flight at once. Threaded through
+# from --dub-workers; a value of 1 reproduces today's serial behaviour exactly.
+_MAX_WORKERS = 8
 
-# ffmpeg reports every input's length as "Duration: HH:MM:SS.ss" on stderr, so the
-# silencedetect pass already carries the clip duration -- no separate ffprobe needed.
-_DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d\d):(\d\d(?:\.\d+)?)")
+# Bounded retry around the TTS call: up to this many attempts, sleeping this many seconds
+# (exponential) between them.
+_TTS_MAX_ATTEMPTS = 3
+_TTS_BACKOFF_SECONDS = (1, 2)
 
 
 @dataclass(frozen=True)
@@ -67,175 +69,48 @@ def fit_rate(actual_duration: float, slot_duration: float) -> float:
     return min(max(actual_duration / slot_duration, _MIN_RATE), _MAX_RATE)
 
 
-def _probe_duration(fpath: Path) -> float:
-    result = run_ffmpeg(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(fpath),
-        ],
-        what=f"Probing the duration of {fpath.name}",
-    )
-    return float(result.stdout.strip())
+def _tts_with_retry(tts: TTSProvider, text: str, clip_path: Path, rate: float) -> None:
+    """Call `tts` with a provider-agnostic bounded retry.
 
-
-def _parse_duration(stderr_text: str) -> float | None:
-    """Read the input duration out of an ffmpeg run's stderr, if it reported one."""
-    match = _DURATION_RE.search(stderr_text)
-    if match is None:
-        return None
-
-    hours, minutes, seconds = match.groups()
-    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
-
-
-def _parse_silence_intervals(stderr_text: str) -> list[tuple[float, float | None]]:
-    """Parse ffmpeg `silencedetect` stderr into a list of (start, end) intervals.
-
-    Each `silence_start: Z` line is paired with the `silence_end: X | silence_duration: Y`
-    line that follows it. A silence that runs to end-of-file emits a `silence_start` with
-    no matching `silence_end` line at all -- that interval's end is `None`.
+    Up to `_TTS_MAX_ATTEMPTS` attempts, sleeping `_TTS_BACKOFF_SECONDS` (exponential)
+    between them; the last exception is re-raised if every attempt fails. Catches plain
+    `Exception` rather than a vendor 429 type so no vendor SDK needs importing into this
+    module, and transient network blips get covered too. This wraps only the TTS call --
+    NOT the aligner call, which is handled separately (see `_synthesise_and_measure`): an
+    aligner exception is an intended degrade signal that `FallbackAlign` acts on by moving
+    to the next tier and latching the failed one off, so retrying it here would fight that.
     """
-    intervals: list[tuple[float, float | None]] = []
-    pending_start: float | None = None
-    for line in stderr_text.splitlines():
-        line = line.strip()
-        if "silence_start:" in line:
-            if pending_start is not None:
-                # A silence_start with no silence_end before the next one started --
-                # shouldn't happen in practice, but close it out as open-ended rather
-                # than silently dropping it.
-                intervals.append((pending_start, None))
-            pending_start = float(line.split("silence_start:")[1].strip().split()[0])
-        elif "silence_end:" in line and pending_start is not None:
-            value = float(line.split("silence_end:")[1].strip().split("|")[0].strip())
-            intervals.append((pending_start, value))
-            pending_start = None
-
-    if pending_start is not None:
-        intervals.append((pending_start, None))
-
-    return intervals
-
-
-def _boundaries_from_intervals(
-    intervals: list[tuple[float, float | None]], duration: float
-) -> tuple[float, float]:
-    """Derive (speech_start, speech_end) from parsed silence intervals.
-
-    Only an interval that actually touches the clip's edges counts as padding to trim;
-    internal pauses (silence surrounded by speech on both sides) are speech content and
-    are ignored entirely.
-    """
-    speech_start = 0.0
-    for start, end in intervals:
-        if start <= _SILENCE_EPSILON and end is not None:
-            speech_start = end
-            break
-
-    speech_end = duration
-    for start, end in reversed(intervals):
-        if end is None or abs(end - duration) <= _SILENCE_EPSILON:
-            speech_end = start
-            break
-
-    if speech_end <= speech_start:
-        return 0.0, duration
-
-    return speech_start, speech_end
-
-
-def _detect_silence(fpath: Path) -> tuple[float, float]:
-    """Find real speech boundaries in a studio-clean TTS clip via ffmpeg `silencedetect`.
-
-    Returns (speech_start, speech_end). TTS output has no background noise, so silence
-    detection finds the same leading/trailing padding boundaries a real VAD would.
-    Internal (mid-sentence) pauses are detected too but must not be mistaken for padding --
-    see `_boundaries_from_intervals`. `-vn` keeps the cost independent of what the clip
-    container happens to hold.
-    """
-    stderr_text = run_ffmpeg(
-        [
-            "ffmpeg",
-            "-i",
-            str(fpath),
-            "-vn",
-            "-af",
-            "silencedetect=noise=-30dB:d=0.1",
-            "-f",
-            "null",
-            "-",
-        ],
-        what=f"Detecting silence in {fpath.name}",
-    ).stderr
-
-    duration = _parse_duration(stderr_text)
-    if duration is None:
-        duration = _probe_duration(fpath)
-
-    return _boundaries_from_intervals(_parse_silence_intervals(stderr_text), duration)
-
-
-class _BoundaryMeasurer:
-    """Measure the real speech boundaries of synthesised clips via a degrading chain.
-
-    Forced Alignment (when an `aligner` is given) -> ffmpeg `silencedetect` -> ffprobe
-    container duration (no trim, logged as a warning). Any exception from the aligner
-    degrades to the next tier for that clip *and* latches the aligner off for the rest of
-    the run -- a broken aligner would otherwise cost one failing API call per clip. Each
-    tier is logged only the first time it is used in this run, not once per clip, so a
-    silently-taken fallback still shows up in the log exactly once.
-    """
-
-    def __init__(self, aligner: AlignmentProvider | None = None) -> None:
-        self.aligner = aligner
-        self._logged: set[str] = set()
-
-    def __call__(self, clip_path: Path, text: str) -> tuple[float, float]:
-        return self.measure(clip_path, text)
-
-    def _log_once(self, key: str, message: str, *, warn: bool = False) -> None:
-        if key in self._logged:
-            return
-
-        self._logged.add(key)
-        (logger.warning if warn else logger.info)(message)
-
-    def measure(self, clip_path: Path, text: str) -> tuple[float, float]:
-        if self.aligner is not None:
-            try:
-                boundaries = self.aligner(clip_path, text)
-                self._log_once(
-                    "alignment", "Measuring dub clip speech boundaries via Forced Alignment."
-                )
-                return boundaries
-            except Exception as exc:
-                self.aligner = None
-                logger.warning(
-                    f"Forced Alignment unavailable ({exc}); falling back to ffmpeg "
-                    "silencedetect for speech-boundary measurement."
-                )
-
+    for attempt in range(1, _TTS_MAX_ATTEMPTS + 1):
         try:
-            boundaries = _detect_silence(clip_path)
+            tts(text, clip_path, speed=rate)
+            return
         except Exception as exc:
-            self._log_once(
-                "silencedetect_failed",
-                f"ffmpeg silencedetect failed ({exc}); falling back to ffprobe container "
-                "duration -- no padding trim, coarser drift tracking.",
-                warn=True,
+            if attempt == _TTS_MAX_ATTEMPTS:
+                raise
+            backoff = _TTS_BACKOFF_SECONDS[attempt - 1]
+            logger.warning(
+                f"TTS call for {clip_path.name} failed ({exc}); retrying in {backoff}s "
+                f"(attempt {attempt}/{_TTS_MAX_ATTEMPTS})."
             )
-            return 0.0, _probe_duration(clip_path)
+            time.sleep(backoff)
 
-        self._log_once(
-            "silencedetect", "Measuring dub clip speech boundaries via ffmpeg silencedetect."
-        )
-        return boundaries
+
+def _synthesise_and_measure(
+    segment: Segment,
+    text: str,
+    tts: TTSProvider,
+    aligner: AlignmentProvider,
+    work_dir: Path,
+    rate: float,
+) -> _Clip:
+    """Synthesise one segment at `rate` and measure its speech boundaries.
+
+    This is the unit of work submitted to the thread pool for both phase A and phase B.
+    """
+    clip_path = work_dir / f"segment_{segment.id:05d}.mp3"
+    _tts_with_retry(tts, text, clip_path, rate)
+    speech_start, speech_end = aligner(clip_path, text)
+    return _Clip(clip_path, speech_start, speech_end)
 
 
 def _group_segments(segments: list[Segment]) -> list[list[Segment]]:
@@ -256,24 +131,6 @@ def _group_segments(segments: list[Segment]) -> list[list[Segment]]:
     if current:
         groups.append(current)
     return groups
-
-
-def _synthesise_group(
-    group: list[Segment],
-    translations: dict[int, str],
-    tts: TTSProvider,
-    work_dir: Path,
-    measure: _BoundaryMeasurer,
-    rate: float,
-) -> list[_Clip]:
-    """Synthesise every segment in `group` at `rate` and measure its speech boundaries."""
-    clips: list[_Clip] = []
-    for segment in group:
-        text = translations[segment.id]
-        clip_path = work_dir / f"segment_{segment.id:05d}.mp3"
-        tts(text, clip_path, speed=rate)
-        clips.append(_Clip(clip_path, *measure(clip_path, text)))
-    return clips
 
 
 def _layout_group(
@@ -305,27 +162,6 @@ def _layout_group(
     return placements, prev_placed_end
 
 
-def _synthesise_and_lay_out(
-    group: list[Segment],
-    translations: dict[int, str],
-    tts: TTSProvider,
-    work_dir: Path,
-    measure: _BoundaryMeasurer,
-    anchor: float,
-    group_source_end: float,
-    rate: float,
-) -> tuple[list[_Placement], float]:
-    """Synthesise a group at `rate` and lay it out, returning (placements, drift).
-
-    Drift is the placed end of the last clip measured against the group's source end;
-    positive means the group ran long. Called once per group at 1.0x and, when that drift
-    leaves the tolerance band, a second time at the shared corrective rate.
-    """
-    clips = _synthesise_group(group, translations, tts, work_dir, measure, rate)
-    placements, placed_end = _layout_group(group, clips, anchor, group_source_end)
-    return placements, placed_end - group_source_end
-
-
 def synthesise_track(
     segments: list[Segment],
     translations: dict[int, str],
@@ -333,7 +169,8 @@ def synthesise_track(
     out_path: Path,
     work_dir: Path | None = None,
     *,
-    aligner: AlignmentProvider | None = None,
+    aligner: AlignmentProvider,
+    max_workers: int = _MAX_WORKERS,
 ) -> Path:
     """Synthesise translated segments and assemble them onto a silent timeline.
 
@@ -342,11 +179,20 @@ def synthesise_track(
     groups (see `_group_segments`); within a group, clips float sequentially from the
     group's anchor at their natural 1.0x rate. If the group's accumulated drift against its
     source span exceeds `_DRIFT_TOLERANCE`, the whole group is re-synthesised once at a
-    single shared corrective rate clamped to [_MIN_RATE, _MAX_RATE]. `aligner`, when given,
-    is a `(clip: Path, text: str) -> (speech_start, speech_end)` callable (e.g. ElevenLabs
-    Forced Alignment); any exception from it degrades to ffmpeg `silencedetect`, then to
-    ffprobe container duration as a last resort (see `_BoundaryMeasurer`). Produces one
-    continuous audio file at `out_path`. Returns `out_path`.
+    single shared corrective rate clamped to [_MIN_RATE, _MAX_RATE].
+
+    Synthesis and measurement run over one bounded `ThreadPoolExecutor` (size
+    `max_workers`) in two flat batches, independent of group boundaries: phase A submits
+    every translated segment of every group at 1.0x, each task synthesising with `tts` and
+    then measuring with `aligner` (a `(clip: Path, text: str) -> (speech_start,
+    speech_end)` callable, e.g. `FallbackAlign`). Results are collected by submission
+    index, so the outcome does not depend on completion order. A purely arithmetic layout
+    pass then walks the groups in order computing drift and, for any group past
+    `_DRIFT_TOLERANCE`, its shared corrective rate. Phase B is a second flat batch,
+    resynthesising only the segments of drifted groups at their group's rate; those groups
+    are then re-laid-out. Per-group log lines are emitted from the layout passes, in group
+    order, so they never interleave with synthesis. Produces one continuous audio file at
+    `out_path`. Returns `out_path`.
     """
     if work_dir is None:
         work_dir = Path(tempfile.mkdtemp(prefix="movie-subtitles-dub-"))
@@ -357,41 +203,92 @@ def synthesise_track(
         for raw_group in _group_segments(segments)
         if (translated := [s for s in raw_group if translations.get(s.id)])
     ]
-    measure = _BoundaryMeasurer(aligner)
+
+    pool_size = max(1, max_workers)
+    with ThreadPoolExecutor(max_workers=pool_size) as executor:
+        # Phase A: one flat batch over every segment of every group at 1.0x.
+        phase_a_futures = [
+            [
+                executor.submit(
+                    _synthesise_and_measure,
+                    segment,
+                    translations[segment.id],
+                    tts,
+                    aligner,
+                    work_dir,
+                    1.0,
+                )
+                for segment in group
+            ]
+            for group in groups
+        ]
+        phase_a_clips = [[future.result() for future in futures] for futures in phase_a_futures]
+
+        # Layout pass (pure arithmetic): compute placements/drift and decide which groups
+        # need a corrective re-synthesis.
+        anchors = [group[0].start for group in groups]
+        group_source_ends = [group[-1].end for group in groups]
+        placements_by_group: list[list[_Placement]] = [[] for _ in groups]
+        needs_correction: list[bool] = [False] * len(groups)
+        shared_rates: list[float] = [1.0] * len(groups)
+
+        for idx, group in enumerate(groups):
+            placements, placed_end = _layout_group(
+                group, phase_a_clips[idx], anchors[idx], group_source_ends[idx]
+            )
+            placements_by_group[idx] = placements
+            drift = placed_end - group_source_ends[idx]
+
+            if abs(drift) > _DRIFT_TOLERANCE:
+                group_speech_len = sum(placement.speech_len for placement in placements)
+                shared_rate = fit_rate(
+                    group_speech_len, max(group_source_ends[idx] - anchors[idx], 0.0)
+                )
+                shared_rates[idx] = shared_rate
+                needs_correction[idx] = True
+                logger.info(
+                    f"Group {idx} ({len(group)} segment(s)) drifted {drift:+.2f}s past its "
+                    f"source span; re-synthesising once at a shared rate of {shared_rate:.2f}x."
+                )
+            else:
+                logger.info(
+                    f"Group {idx} ({len(group)} segment(s)) drift {drift:+.2f}s within "
+                    "tolerance; left at 1.0x."
+                )
+
+        # Phase B: one flat batch over every segment of every drifted group, at that
+        # group's shared rate.
+        phase_b_futures = {
+            idx: [
+                executor.submit(
+                    _synthesise_and_measure,
+                    segment,
+                    translations[segment.id],
+                    tts,
+                    aligner,
+                    work_dir,
+                    shared_rates[idx],
+                )
+                for segment in groups[idx]
+            ]
+            for idx in range(len(groups))
+            if needs_correction[idx]
+        }
+        phase_b_clips = {
+            idx: [future.result() for future in futures] for idx, futures in phase_b_futures.items()
+        }
+
+    for idx in sorted(phase_b_clips):
+        group = groups[idx]
+        placements, placed_end = _layout_group(
+            group, phase_b_clips[idx], anchors[idx], group_source_ends[idx]
+        )
+        placements_by_group[idx] = placements
+        drift = placed_end - group_source_ends[idx]
+        logger.info(f"Group {idx} corrected; residual drift {drift:+.2f}s.")
 
     inputs: list[_Placement] = []
-    for group_idx, group in enumerate(groups):
-        anchor = group[0].start
-        group_source_end = group[-1].end
-
-        placements, drift = _synthesise_and_lay_out(
-            group, translations, tts, work_dir, measure, anchor, group_source_end, rate=1.0
-        )
-
-        if abs(drift) > _DRIFT_TOLERANCE:
-            group_speech_len = sum(placement.speech_len for placement in placements)
-            shared_rate = fit_rate(group_speech_len, max(group_source_end - anchor, 0.0))
-            logger.info(
-                f"Group {group_idx} ({len(group)} segment(s)) drifted {drift:+.2f}s past its "
-                f"source span; re-synthesising once at a shared rate of {shared_rate:.2f}x."
-            )
-            placements, drift = _synthesise_and_lay_out(
-                group,
-                translations,
-                tts,
-                work_dir,
-                measure,
-                anchor,
-                group_source_end,
-                rate=shared_rate,
-            )
-            logger.info(f"Group {group_idx} corrected; residual drift {drift:+.2f}s.")
-        else:
-            logger.info(
-                f"Group {group_idx} ({len(group)} segment(s)) drift {drift:+.2f}s within "
-                "tolerance; left at 1.0x."
-            )
-
+    for placements in placements_by_group:
         inputs.extend(placements)
 
     _assemble_timeline(inputs, out_path)
