@@ -174,33 +174,55 @@ def _submit_group(
 
 
 def _resolve(batches: Iterable[list[Future[_Clip]]]) -> list[list[_Clip]]:
-    """Wait for every future in `batches`, failing fast, and return their clips per batch.
+    """Wait for every future across every batch in `batches`, failing fast, and return
+    their clips per batch.
 
     Shared by both synthesis phases so their abort behaviour cannot drift, and the only
     way to get at the clips -- collecting results without first waiting is therefore not
-    expressible. Waits with `FIRST_EXCEPTION`; on a failure, cancels every future in the
-    batch (a no-op on any task that has already started, so only the still-queued tail is
-    dropped), logs a WARNING accounting for each category of the batch, and re-raises the
-    original exception instance. Already-running tasks are left to finish by the caller's
-    pool shutdown, so no worker outlives the exception.
+    expressible. `batches` is flattened in full before waiting: on a failure, the abort
+    cancels across every batch handed in, not just the one containing the failure (phase
+    B passes every drifted group's batch at once). Waits with `FIRST_EXCEPTION`; on a
+    failure, the still-queued tail is cancelled first, then every future is classified in
+    one pass over its now-final state, so nothing that has completed can be reported as
+    in-flight. Logs a WARNING accounting for each category of the batch (the four counts
+    sum to the batch size) and re-raises the original exception instance from the
+    lowest-submission-index failure, deterministic even when multiple tasks fail
+    concurrently. Already-running tasks are left to finish by the caller's pool shutdown,
+    so no worker outlives the exception.
     """
     grouped = list(batches)
     futures = [future for batch in grouped for future in batch]
     done, _ = wait(futures, return_when=FIRST_EXCEPTION)
 
-    # Classified from `done` alone: it is an immutable snapshot taken by `wait`, so every
-    # count below describes the same instant, and `.exception()` on its members never
-    # blocks. Anything outside it was still running when the failure was detected.
-    failures = [future for future in done if future.exception() is not None]
-    if failures:
-        cancelled = sum(1 for future in futures if future.cancel())
+    if any(future.exception() is not None for future in done):
+        # Cancel the still-queued tail first; a future that already started or finished
+        # by the time we get to it below returns False here and is classified from its
+        # own (now final) state instead, so it can never land in the in-flight bucket.
+        for future in futures:
+            if future not in done:
+                future.cancel()
+
+        succeeded = failed = cancelled = in_flight = 0
+        failures: dict[int, BaseException] = {}
+        for index, future in enumerate(futures):
+            if future.cancelled():
+                cancelled += 1
+            elif future.done():
+                exc = future.exception()
+                if exc is not None:
+                    failed += 1
+                    failures[index] = exc
+                else:
+                    succeeded += 1
+            else:
+                in_flight += 1
+
         logger.warning(
-            f"Dub synthesis task failed: {len(done) - len(failures)} succeeded, "
-            f"{len(failures)} failed, {cancelled} cancelled before starting, "
-            f"{len(futures) - len(done) - cancelled} still in flight and will finish "
-            f"before the abort completes, out of {len(futures)} segment(s)."
+            f"Dub synthesis task failed: {succeeded} succeeded, {failed} failed, "
+            f"{cancelled} cancelled before starting, {in_flight} still in flight and "
+            f"will finish before the abort completes, out of {len(futures)} segment(s)."
         )
-        raise failures[0].exception()
+        raise failures[min(failures)]
 
     return [[future.result() for future in batch] for batch in grouped]
 
@@ -279,8 +301,7 @@ def synthesise_track(
         if (translated := [s for s in raw_group if translations.get(s.id)])
     ]
 
-    pool_size = max(1, max_workers)
-    with ThreadPoolExecutor(max_workers=pool_size) as executor:
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Phase A: one flat batch over every segment of every group at 1.0x.
         phase_a_futures = [
             _submit_group(executor, group, translations, tts, aligner, work_dir, 1.0)
