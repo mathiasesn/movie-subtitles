@@ -18,6 +18,7 @@ class Segment:
     end: float
     text: str
     words: list[Word] | None = None
+    speaker: str | None = None
 
 
 class ASRProvider(Protocol):
@@ -29,7 +30,9 @@ class TranslationProvider(Protocol):
 
 
 class TTSProvider(Protocol):
-    def __call__(self, text: str, out_path: Path, speed: float = 1.0) -> Path: ...
+    def __call__(
+        self, text: str, out_path: Path, speed: float = 1.0, voice: str | None = None
+    ) -> Path: ...
 
 
 class AlignmentProvider(Protocol):

@@ -157,16 +157,20 @@ class OpenAISpeak:
         self.model = model
         self.client = build_client()
 
-    def __call__(self, text: str, out_path: Path, speed: float = 1.0) -> Path:
-        return self.speak(text, out_path, speed)
+    def __call__(
+        self, text: str, out_path: Path, speed: float = 1.0, voice: str | None = None
+    ) -> Path:
+        return self.speak(text, out_path, speed, voice)
 
-    def speak(self, text: str, out_path: Path, speed: float = 1.0) -> Path:
+    def speak(
+        self, text: str, out_path: Path, speed: float = 1.0, voice: str | None = None
+    ) -> Path:
         speed = max(_MIN_SPEED, min(_MAX_SPEED, speed))
         logger.info(f"Synthesising {len(text)} chars to {out_path} (speed={speed:.3f})")
 
         response = self.client.audio.speech.create(
             model=self.model,
-            voice=self.voice,
+            voice=voice or self.voice,
             input=text,
             speed=speed,
         )
