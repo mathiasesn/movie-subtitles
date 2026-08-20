@@ -8,6 +8,7 @@ only) TTS engines. See `specs/speaker-matched-dub-voices.md` for the design.
 import json
 import logging
 import tempfile
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -145,6 +146,32 @@ def _segments_overlap(a: Segment, b: Segment) -> bool:
     return a.start < b.end and b.start < a.end
 
 
+def _probe_duration(fpath: Path) -> float:
+    """Measure a produced audio file's actual duration via ffprobe.
+
+    Mirrors `providers/ffmpeg_align.py:_probe_duration` (that one is module-private,
+    so this is a small, deliberate duplication rather than reaching into another
+    module's private helper) -- the repo already measures duration this way rather
+    than trusting a requested cut length, and the same reasoning applies here: an
+    `-ss`/`-t` cut can run past the source's actual end, so the seconds gathered must
+    come from the produced file, not the requested `take`.
+    """
+    result = run_ffmpeg(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(fpath),
+        ],
+        what=f"Probing the duration of {fpath.name}",
+    )
+    return float(result.stdout.strip())
+
+
 def extract_speaker_sample(
     source: str | Path,
     speaker: str,
@@ -169,7 +196,11 @@ def extract_speaker_sample(
     workdir.mkdir(parents=True, exist_ok=True)
 
     own_segments = sorted((s for s in segments if s.speaker == speaker), key=lambda s: s.start)
-    other_segments = [s for s in segments if s.speaker is not None and s.speaker != speaker]
+    # Unlabelled segments (speaker is None) are treated as disqualifying overlaps, not
+    # excluded: an unlabelled stretch is exactly the ambiguous case the "no other
+    # speaker overlaps" rule exists to rule out -- it may belong to a different,
+    # unrecognised speaker, so it must not be allowed to co-occur with a "clean" clip.
+    other_segments = [s for s in segments if s.speaker != speaker]
 
     clean = [
         s for s in own_segments if not any(_segments_overlap(s, other) for other in other_segments)
@@ -208,7 +239,11 @@ def extract_speaker_sample(
             what=f"extracting sample clip for speaker {speaker!r}",
         )
         clip_paths.append(clip_path)
-        gathered += take
+        # Measure what ffmpeg actually produced, not the requested `take`: a cut
+        # requested near the source's end can run short of it (e.g. `-t` extends past
+        # EOF), which would otherwise overstate `gathered` and let a speaker clear
+        # --clone-min-seconds on less real audio than reported.
+        gathered += _probe_duration(clip_path)
 
     sample_path = workdir / f"{speaker}_sample.wav"
     if not clip_paths:
@@ -390,42 +425,62 @@ def resolve_voices(
 
         client = build_client()
 
-    for speaker in speakers:
-        if want_clone and can_clone:
-            sample_path, seconds_gathered = extract_speaker_sample(
-                source, speaker, segments, target_seconds=clone_target_seconds
-            )
-            if seconds_gathered >= clone_min_seconds:
-                from movie_subtitles.providers.elevenlabs import clone_voice
+    # A speaker's clone succeeds by mutating the ElevenLabs account (client.voices.ivc
+    # .create) immediately -- there is no way to "undo" that except an explicit delete.
+    # If a later speaker's extract_speaker_sample/clone_voice call raises (e.g. an
+    # ffmpeg failure), the exception below would otherwise propagate straight out of
+    # this function, and `cloned_ids` -- along with every voice slot it names -- would
+    # never reach any caller: a permanent leak, the exact failure this design exists to
+    # prevent. So any exception raised while resolving a speaker is caught here, has
+    # the ids already cloned so far attached to it (`exc.cloned_voice_ids`), and is then
+    # re-raised: `cli.py` reads that attribute to clean up before propagating the error,
+    # instead of only reading `VoiceResolution.cloned_voice_ids`, which a raise never
+    # produces.
+    try:
+        for speaker in speakers:
+            if want_clone and can_clone:
+                sample_path, seconds_gathered = extract_speaker_sample(
+                    source, speaker, segments, target_seconds=clone_target_seconds
+                )
+                if seconds_gathered >= clone_min_seconds:
+                    from movie_subtitles.providers.elevenlabs import clone_voice
 
-                name = f"{voice_name_prefix} {Path(source).stem} {speaker}"
-                try:
-                    voice_id = clone_voice(client, name, [sample_path])
-                except Exception as exc:  # noqa: BLE001 -- degrade to preset, never abort
-                    logger.warning(
-                        f"Cloning voice for speaker {speaker!r} failed ({exc}); falling "
-                        "back to a preset voice"
-                    )
-                    profile = classify_voice(sample_path)
-                    voices[speaker] = _preset_voice(presets, tts_engine, profile)
+                    name = f"{voice_name_prefix} {Path(source).stem} {speaker}"
+                    try:
+                        voice_id = clone_voice(client, name, [sample_path])
+                    except Exception as exc:  # noqa: BLE001 -- degrade to preset, never abort
+                        logger.warning(
+                            f"Cloning voice for speaker {speaker!r} failed ({exc}); falling "
+                            "back to a preset voice"
+                        )
+                        profile = classify_voice(sample_path)
+                        voices[speaker] = _preset_voice(presets, tts_engine, profile)
+                        continue
+
+                    voices[speaker] = voice_id
+                    cloned_ids.append(voice_id)
                     continue
 
-                voices[speaker] = voice_id
-                cloned_ids.append(voice_id)
-                continue
+                logger.warning(
+                    f"Speaker {speaker!r} has only {seconds_gathered:.1f}s of clean audio "
+                    f"(need {clone_min_seconds:.1f}s to clone); falling back to a preset voice"
+                )
+                profile = classify_voice(sample_path)
+            else:
+                sample_path, _seconds_gathered = extract_speaker_sample(
+                    source, speaker, segments, target_seconds=clone_target_seconds
+                )
+                profile = classify_voice(sample_path)
 
-            logger.warning(
-                f"Speaker {speaker!r} has only {seconds_gathered:.1f}s of clean audio "
-                f"(need {clone_min_seconds:.1f}s to clone); falling back to a preset voice"
-            )
-            profile = classify_voice(sample_path)
-        else:
-            sample_path, _seconds_gathered = extract_speaker_sample(
-                source, speaker, segments, target_seconds=clone_target_seconds
-            )
-            profile = classify_voice(sample_path)
-
-        voices[speaker] = _preset_voice(presets, tts_engine, profile)
+            voices[speaker] = _preset_voice(presets, tts_engine, profile)
+    except Exception as exc:
+        # Hand the caller whatever was cloned before the failure so it can release the
+        # slots; a raise never returns the VoiceResolution that would otherwise carry
+        # them. suppress(): an exception type defining __slots__ rejects the attribute,
+        # and failing to annotate the error must never replace the error itself.
+        with suppress(Exception):
+            exc.cloned_voice_ids = cloned_ids  # type: ignore[attr-defined]
+        raise
 
     return VoiceResolution(voices=voices, cloned_voice_ids=cloned_ids)
 

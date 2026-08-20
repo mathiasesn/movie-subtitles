@@ -47,7 +47,7 @@ movie_subtitles/
                     # mode, and cleanup_cloned_voices() deletes cloned voices after the run
   ffmpeg.py         # audio_codec_for() container->codec table + run(): the one place that
                     # invokes ffmpeg and turns a non-zero exit into a RuntimeError quoting
-                    # its stderr, shared by dub.py and mux.py
+                    # its stderr, shared by dub.py, mux.py and voices.py
   dubbing.py        # ManagedDub: the --managed path, independent of the rest
   providers/
     base.py          # Word (frozen: start/end/text) + Segment dataclass (start/end/

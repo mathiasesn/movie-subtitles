@@ -16,7 +16,13 @@ from movie_subtitles.providers.base import (
     TTSProvider,
 )
 from movie_subtitles.srt import format_block, pad_cue_end
-from movie_subtitles.voices import CLONE_MIN_SECONDS, CLONE_TARGET_SECONDS, VOICE_MATCH_MODES
+from movie_subtitles.voices import (
+    CLONE_MIN_SECONDS,
+    CLONE_TARGET_SECONDS,
+    VOICE_MATCH_MODES,
+    cleanup_cloned_voices,
+    resolve_voices,
+)
 
 logger = logging.getLogger("cli")
 
@@ -46,7 +52,9 @@ def _budget_chars(start: float, end: float) -> int:
     return max(int(duration * _CHARS_PER_SECOND), 1)
 
 
-def _build_asr_provider(asr_engine: str, whisper_model_name: str) -> ASRProvider:
+def _build_asr_provider(
+    asr_engine: str, whisper_model_name: str, diarize: bool = True
+) -> ASRProvider:
     if asr_engine == "local":
         from movie_subtitles.providers.local import Transcribe
 
@@ -54,7 +62,15 @@ def _build_asr_provider(asr_engine: str, whisper_model_name: str) -> ASRProvider
     elif asr_engine == "elevenlabs":
         from movie_subtitles.providers.elevenlabs import ScribeTranscribe
 
-        return ScribeTranscribe()
+        # diarize is only meaningful (and only wired) here: it's Scribe requesting
+        # per-word speaker_id from the API, which _group_words then uses as a fourth
+        # cue-flush trigger. Wired from --voice-match rather than --dub, on purpose:
+        # the cue-splitting-on-speaker-change improvement to .srt output applies to
+        # plain (non-dub) elevenlabs runs too, and the docs advertise it -- so it
+        # must not be silently disabled just because --dub was not passed. Only an
+        # explicit --voice-match off, which promises byte-for-byte pre-diarization
+        # behaviour, turns it off.
+        return ScribeTranscribe(diarize=diarize)
     elif asr_engine == "openai":
         from movie_subtitles.providers.openai_ import OpenAITranscribe
 
@@ -131,6 +147,19 @@ def create_subtitles(
             "--clone-target-seconds."
         )
 
+    # Validate a --voice-preset-table up front, alongside the min/target check above,
+    # rather than letting resolve_voices() reach load_preset_table() only after ASR and
+    # full translation have already run (potentially minutes of paid API calls). This
+    # does mean the file is parsed twice (again inside resolve_voices()) when dubbing
+    # actually proceeds -- acceptable because parsing a small JSON file is negligible
+    # next to the ASR/translation work it now gates, and keeping load_preset_table()
+    # itself as the single source of validation logic (called from both places) is
+    # simpler than plumbing the parsed table all the way through to resolve_voices().
+    if voice_preset_table is not None:
+        from movie_subtitles.voices import load_preset_table
+
+        load_preset_table(voice_preset_table)
+
     # --engine is the shorthand that sets all stages; --asr-engine/--translation-engine/
     # --tts-engine override it per stage (Goal 2 of specs/openai-api-key-support.md).
     resolved_asr_engine = asr_engine if asr_engine is not None else engine
@@ -180,7 +209,9 @@ def create_subtitles(
         _check_ffmpeg_tools()
         tts = _build_tts_provider(resolved_tts_engine)
 
-    transcriber = _build_asr_provider(resolved_asr_engine, whisper_model_name)
+    transcriber = _build_asr_provider(
+        resolved_asr_engine, whisper_model_name, diarize=voice_match != "off"
+    )
     segments = transcriber(fpath, audio_lang)
 
     srt_lines = []
@@ -228,17 +259,32 @@ def create_subtitles(
             voices_map: dict[str | None, str | None] = {}
             cloned_voice_ids: list[str] = []
         else:
-            from movie_subtitles import voices as voices_module
-
-            resolution = voices_module.resolve_voices(
-                fpath,
-                dub_segments,
-                tts_engine=resolved_tts_engine,
-                mode=voice_match,
-                clone_min_seconds=clone_min_seconds,
-                clone_target_seconds=clone_target_seconds,
-                preset_table_path=voice_preset_table,
-            )
+            try:
+                resolution = resolve_voices(
+                    fpath,
+                    dub_segments,
+                    tts_engine=resolved_tts_engine,
+                    mode=voice_match,
+                    clone_min_seconds=clone_min_seconds,
+                    clone_target_seconds=clone_target_seconds,
+                    preset_table_path=voice_preset_table,
+                )
+            except Exception as exc:
+                # A mid-resolution failure (e.g. extract_speaker_sample's ffmpeg call
+                # raising for a later speaker) still leaves earlier speakers' voices
+                # cloned on the ElevenLabs account. resolve_voices attaches whatever it
+                # cloned before failing to the exception; clean those up here rather
+                # than losing them, then let the original error propagate.
+                leaked = getattr(exc, "cloned_voice_ids", None)
+                if leaked:
+                    if keep_cloned_voices:
+                        logger.info(
+                            "Keeping cloned voices from a failed resolution "
+                            f"(--keep-cloned-voices): {', '.join(leaked)}"
+                        )
+                    else:
+                        cleanup_cloned_voices(leaked)
+                raise
             voices_map = resolution.voices
             cloned_voice_ids = resolution.cloned_voice_ids
 
@@ -260,8 +306,6 @@ def create_subtitles(
                         f"{', '.join(cloned_voice_ids)}"
                     )
                 else:
-                    from movie_subtitles.voices import cleanup_cloned_voices
-
                     cleanup_cloned_voices(cloned_voice_ids)
 
 

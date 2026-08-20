@@ -25,6 +25,11 @@ dependencies = [
     "librosa",
     # speaker-voice classifier: Praat-based formant tracking (F1/F2).
     "praat-parselmouth",
+    # voices.py:classify_voice imports numpy directly (np.isnan/np.median over the
+    # librosa/parselmouth outputs); it currently resolves transitively via librosa,
+    # but a directly-imported package must be declared per this repo's convention
+    # (see the accelerate entry above).
+    "numpy",
 ]
 
 [project.urls]
