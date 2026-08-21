@@ -56,6 +56,11 @@ _NO_VOICES: dict[str | None, str | None] = {}
 # 2**(attempt-1) second backoff between them (1s, 2s, ...).
 _TTS_MAX_ATTEMPTS = 3
 
+# Pre/post pad applied to each placed speech span before coalescing, so ducking (in
+# mux.py) fades in slightly ahead of the dub's speech and releases slightly after it,
+# rather than snapping exactly on the measured boundary.
+_SPAN_PAD = 0.15
+
 
 @dataclass(frozen=True)
 class _Clip:
@@ -418,6 +423,30 @@ def _corrective_rate(
     return rate
 
 
+def _speech_spans(placements: list[_Placement]) -> list[tuple[float, float]]:
+    """Coalesced, sorted `(start, end)` speech spans from placed clips.
+
+    Each placement's `[start, start + speech_len]` is padded by `_SPAN_PAD` on both
+    sides, then adjacent/overlapping spans are merged so callers (mux.py's ducking
+    filter) never see two spans that touch or cross.
+    """
+    raw = sorted(
+        (
+            max(p.start - _SPAN_PAD, 0.0),
+            p.start + p.speech_len + _SPAN_PAD,
+        )
+        for p in placements
+    )
+
+    merged: list[tuple[float, float]] = []
+    for start, end in raw:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
 def synthesise_track(
     segments: list[Segment],
     translations: dict[int, str],
@@ -429,7 +458,7 @@ def synthesise_track(
     max_workers: int = _MAX_WORKERS,
     correction_passes: int = _MAX_CORRECTION_PASSES,
     voices: dict[str | None, str | None] = _NO_VOICES,
-) -> Path:
+) -> tuple[Path, list[tuple[float, float]]]:
     """Synthesise translated segments and assemble them onto a silent timeline.
 
     `translations` maps segment.id -> translated text (segments with no translation,
@@ -470,7 +499,7 @@ def synthesise_track(
     otherwise collected by submission index, so a successful outcome does not depend on
     completion order. Per-group log lines are emitted from the layout passes, in group
     order, so they never interleave with synthesis. Produces one continuous audio file at
-    `out_path`. Returns `out_path`.
+    `out_path`.
 
     `voices` maps speaker label -> voice id and is threaded down through `_submit_group` to
     every `tts(...)` call, initial pass and every correction pass alike, via
@@ -480,6 +509,12 @@ def synthesise_track(
     to its own configured default -- so callers that never pass `voices` see byte-for-byte
     today's single-voice behaviour. This has no bearing on timing, grouping, drift or the
     correction loop, all of which operate purely on `Segment`/`_Clip` timestamps.
+
+    Returns `(out_path, spans)`, where `spans` is the coalesced, sorted list of
+    `(start, end)` placed-speech windows across every group (`_speech_spans`), padded
+    slightly on each side and with adjacent/overlapping windows merged. Callers (see
+    `cli.py:_dub_and_mux`) thread `spans` into `mux.py:mux_dub()` to duck the original
+    audio only while the dub is actually speaking.
     """
     if work_dir is None:
         work_dir = Path(tempfile.mkdtemp(prefix="movie-subtitles-dub-"))
@@ -624,7 +659,7 @@ def synthesise_track(
         inputs.extend(placements)
 
     _assemble_timeline(inputs, out_path)
-    return out_path
+    return out_path, _speech_spans(inputs)
 
 
 def _assemble_timeline(inputs: list[_Placement], out_path: Path) -> Path:

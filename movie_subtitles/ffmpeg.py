@@ -61,3 +61,28 @@ def probe_duration(fpath: Path) -> float:
         what=f"Probing the duration of {fpath.name}",
     )
     return float(result.stdout.strip())
+
+
+def has_audio_stream(fpath: Path) -> bool:
+    """Whether `fpath` has at least one audio stream, per ffprobe.
+
+    Used before muxing a dub over a source video: a source with no audio track at all
+    (e.g. a silent clip) can't be ducked-and-mixed, so callers fall back to a dub-only
+    mapping instead of failing.
+    """
+    result = run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=index",
+            "-of",
+            "csv=p=0",
+            str(fpath),
+        ],
+        what=f"Checking {fpath.name} for an audio stream",
+    )
+    return bool(result.stdout.strip())

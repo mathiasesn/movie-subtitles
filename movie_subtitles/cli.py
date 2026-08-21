@@ -352,7 +352,7 @@ def _dub_and_mux(
     audio_track = fpath.with_name(f"{fpath.stem}.dub_audio.mp3")
     aligner = _build_aligner()
 
-    synthesise_track(
+    _, speech_spans = synthesise_track(
         segments,
         translations,
         tts,
@@ -363,7 +363,7 @@ def _dub_and_mux(
         voices=voices,
     )
 
-    dubbed_path = mux_dub(fpath, audio_track)
+    dubbed_path = mux_dub(fpath, audio_track, speech_spans=speech_spans)
     logger.info(f"Saved dubbed video to {dubbed_path}")
 
     audio_track.unlink()
