@@ -2,7 +2,7 @@ import logging
 import shutil
 from pathlib import Path
 
-from movie_subtitles.ffmpeg import audio_codec_for, has_audio_stream, probe_audio_format
+from movie_subtitles.ffmpeg import audio_codec_for, probe_audio_format
 from movie_subtitles.ffmpeg import run as run_ffmpeg
 
 logger = logging.getLogger("mux")
@@ -27,18 +27,38 @@ _MIX_INPUT_GAIN = 0.7
 _MAX_SPANS_PER_FILTER = 200
 
 
-def _duck_expression(spans: list[tuple[float, float]]) -> str:
-    """A `volume` filter expression that attenuates only inside `spans`."""
-    terms = "+".join(f"between(t,{start:.3f},{end:.3f})" for start, end in spans)
-    return f"volume='if(gt({terms},0),{_DUCK_LEVEL},1)':eval=frame"
+def _ducking_chain(spans: list[tuple[float, float]], in_label: str) -> tuple[list[str], str]:
+    """Chained `volume` filter statements that duck `in_label` only inside `spans`.
 
+    Returns `(statements, out_label)`: the statements to splice into a `-filter_complex`
+    graph, and the label carrying the fully-ducked result -- `in_label` itself when
+    `spans` is empty, since then there is nothing to chain.
 
-def _ducking_filters(spans: list[tuple[float, float]]) -> list[str]:
-    """One `volume` filter per chunk of `spans`, chained to bound expression size."""
+    `volume`'s expression is one ffmpeg argv token, and `eval=frame` means it's
+    re-evaluated once per *audio frame* (~47/s at 48 kHz, not per sample) -- but each
+    evaluation still walks every `between()` term in its chunk, so a single filter built
+    from hundreds of terms both risks exceeding practical expression/argv limits and
+    costs real CPU: a 2-hour film with ~1000 spans is on the order of 1e7-1e8
+    expression-node visits, seconds of CPU, non-trivial only because the video track
+    is otherwise `-c:v copy`. Spans are chunked into filters of at most
+    `_MAX_SPANS_PER_FILTER` terms each and chained -- each chunk's spans are disjoint
+    from every other chunk's (spans are globally coalesced before reaching here), so
+    multiplying by 1.0 outside a chunk's own spans never double-ducks. If this chunking
+    ever isn't enough, the fix is a different mechanism entirely (e.g.
+    `sidechaincompress` against the dub track), not more chunks.
+    """
     chunks = [
         spans[i : i + _MAX_SPANS_PER_FILTER] for i in range(0, len(spans), _MAX_SPANS_PER_FILTER)
     ]
-    return [_duck_expression(chunk) for chunk in chunks]
+    statements = []
+    label = in_label
+    for i, chunk in enumerate(chunks):
+        terms = "+".join(f"between(t,{start:.3f},{end:.3f})" for start, end in chunk)
+        expr = f"volume='if(gt({terms},0),{_DUCK_LEVEL},1)':eval=frame"
+        out_label = f"duck{i}"
+        statements.append(f"[{label}]{expr}[{out_label}]")
+        label = out_label
+    return statements, label
 
 
 def mux_dub(
@@ -56,8 +76,9 @@ def mux_dub(
     translated dialogue stays dominant. `speech_spans` is a list of `(start, end)`
     windows in seconds (typically `dub.synthesise_track()`'s second return value);
     omitting it (or passing an empty list) mixes the original in unducked throughout.
-    A source with no audio stream at all (checked via `ffmpeg.has_audio_stream`) falls
-    back to today's dub-only mapping, since there is nothing to mix or duck.
+    A source with no audio stream at all (per `ffmpeg.probe_audio_format` returning
+    `None`) falls back to today's dub-only mapping, since there is nothing to mix or
+    duck.
 
     The video's full duration is authoritative -- no `-shortest`, so a synthesised track
     that ends before the video does (e.g. no speech in the video's tail) does not
@@ -85,29 +106,15 @@ def mux_dub(
         str(audio_path),
     ]
 
-    if not has_audio_stream(video_path):
+    source_format = probe_audio_format(video_path)
+
+    if source_format is None:
         logger.info(f"{video_path} has no audio stream; muxing the dub track alone.")
-        cmd = base_cmd + [
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:a:0",
-            "-c:v",
-            "copy",
-            "-c:a",
-            audio_codec,
-            str(out_path),
-        ]
+        filter_args: list[str] = []
+        audio_map = "1:a:0"
     else:
         spans = speech_spans or []
-        duck_filters = _ducking_filters(spans)
-
-        orig_label = "0:a:0"
-        chained_filters = []
-        for i, expr in enumerate(duck_filters):
-            next_label = f"duck{i}"
-            chained_filters.append(f"[{orig_label}]{expr}[{next_label}]")
-            orig_label = next_label
+        duck_statements, ducked_label = _ducking_chain(spans, "0:a:0")
 
         # Target the *source's* own channel layout/sample rate rather than a fixed
         # stereo/48kHz pair -- this whole feature exists to preserve the original
@@ -118,29 +125,33 @@ def mux_dub(
         # branch is already in that format almost by definition (it's where the
         # target came from), and formatting it too keeps the graph deterministic
         # rather than relying on amix's own negotiation for that branch.
-        channel_layout, sample_rate = probe_audio_format(video_path)
+        channel_layout, sample_rate = source_format
         fmt = (
             f"aformat=sample_fmts=fltp:sample_rates={sample_rate}:channel_layouts={channel_layout}"
         )
-        gain_a = f"[{orig_label}]volume={_MIX_INPUT_GAIN},{fmt}[origmix]"
-        gain_b = f"[1:a:0]volume={_MIX_INPUT_GAIN},{fmt}[dubmix]"
-        mix = "[origmix][dubmix]amix=inputs=2:normalize=0[out]"
+        filter_complex = ";".join(
+            [
+                *duck_statements,
+                f"[{ducked_label}]volume={_MIX_INPUT_GAIN},{fmt}[origmix]",
+                f"[1:a:0]volume={_MIX_INPUT_GAIN},{fmt}[dubmix]",
+                "[origmix][dubmix]amix=inputs=2:normalize=0[out]",
+            ]
+        )
+        filter_args = ["-filter_complex", filter_complex]
+        audio_map = "[out]"
 
-        filter_complex = ";".join([*chained_filters, gain_a, gain_b, mix])
-
-        cmd = base_cmd + [
-            "-filter_complex",
-            filter_complex,
-            "-map",
-            "0:v:0",
-            "-map",
-            "[out]",
-            "-c:v",
-            "copy",
-            "-c:a",
-            audio_codec,
-            str(out_path),
-        ]
+    cmd = base_cmd + [
+        *filter_args,
+        "-map",
+        "0:v:0",
+        "-map",
+        audio_map,
+        "-c:v",
+        "copy",
+        "-c:a",
+        audio_codec,
+        str(out_path),
+    ]
 
     logger.info(f"Muxing dub track over {video_path} -> {out_path} (audio: {audio_codec})")
     run_ffmpeg(cmd, what=f"Muxing the dub track into {out_path.name}")

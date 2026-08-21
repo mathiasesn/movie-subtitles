@@ -42,8 +42,8 @@ movie_subtitles/
                     # with ffmpeg, keeping the original audio underneath -- mixed in
                     # (amix=normalize=0) and ducked to _DUCK_LEVEL inside the caller's
                     # speech_spans, with a per-input gain guarding against clipping. A
-                    # source with no audio stream (ffmpeg.has_audio_stream) falls back
-                    # to the old dub-only mapping
+                    # source with no audio stream (ffmpeg.probe_audio_format returning
+                    # None) falls back to the old dub-only mapping
   voices.py        # --voice-match speaker -> TTS voice id resolution: a single sweep
                     # (_clean_segments_by_speaker) computes every speaker's clean
                     # (non-overlapping) segment set up front, extract_speaker_sample()
@@ -56,10 +56,11 @@ movie_subtitles/
                     # mode, deleting every voice it cloned on exit (success, a raise
                     # during resolution, or a raise from the caller's `with` body) unless
                     # told to keep them
-  ffmpeg.py         # audio_codec_for() container->codec table, has_audio_stream()
-                    # (ffprobe check used by mux.py to decide whether there's an
-                    # original track to keep) + run(): the one place that invokes
-                    # ffmpeg and turns a non-zero exit into a RuntimeError quoting its
+  ffmpeg.py         # audio_codec_for() container->codec table, probe_audio_format()
+                    # (the ffprobe query mux.py uses both to decide whether there's an
+                    # original track to keep and to read its layout/rate) + run(): the
+                    # one place that invokes ffmpeg and turns a non-zero exit into a
+                    # RuntimeError quoting its
                     # stderr, shared by dub.py, mux.py and voices.py
   dubbing.py        # ManagedDub: the --managed path, independent of the rest
   providers/
