@@ -146,6 +146,11 @@ label drives which TTS voice speaks each line:
 - **`auto`** (default) — clones when the resolved TTS engine supports it and the
   speaker has enough clean audio, otherwise falls back to preset matching.
 
+**Cloning needs a plan that includes IVC.** ElevenLabs rejects
+`voices.ivc.create` with `paid_plan_required` on subscriptions without instant voice
+cloning; the run logs a WARNING and every speaker degrades to a preset voice, so
+`--voice-match auto` behaves as `preset` on such an account.
+
 **Cloning is ElevenLabs-only.** `--tts-engine openai` always gets preset voices,
 regardless of `--voice-match` — OpenAI's TTS has no cloning endpoint. Cloned voices
 are deleted automatically once the run finishes (including when the dub raises),
