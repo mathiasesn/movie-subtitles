@@ -1,6 +1,7 @@
 import logging
 import os
 from collections.abc import Iterable
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -34,16 +35,38 @@ def build_client() -> ElevenLabs:
     return ElevenLabs(api_key=api_key)
 
 
+def clone_voice(client: ElevenLabs, name: str, sample_paths: list[Path]) -> str:
+    """Create an Instant Voice Clone from one or more sample audio files.
+
+    Wraps `client.voices.ivc.create`. Returns the new voice's id; the caller is
+    responsible for deleting it (via `delete_voice`) once it is no longer needed.
+    """
+    logger.info(f"Cloning voice {name!r} from {len(sample_paths)} sample(s)")
+    with ExitStack() as stack:
+        files = [stack.enter_context(open(path, "rb")) for path in sample_paths]
+        response = client.voices.ivc.create(name=name, files=files)
+
+    return response.voice_id
+
+
+def delete_voice(client: ElevenLabs, voice_id: str) -> None:
+    """Delete a previously cloned voice. Wraps `client.voices.delete`."""
+    logger.info(f"Deleting voice {voice_id}")
+    client.voices.delete(voice_id)
+
+
 class ScribeTranscribe:
     def __init__(
         self,
         model_id: str = "scribe_v2",
         max_segment_seconds: float = 7.0,
         max_segment_chars: int = 100,
+        diarize: bool = True,
     ) -> None:
         self.model_id = model_id
         self.max_segment_seconds = max_segment_seconds
         self.max_segment_chars = max_segment_chars
+        self.diarize = diarize
 
         self.client = build_client()
 
@@ -60,6 +83,7 @@ class ScribeTranscribe:
                 file=audio_file,
                 model_id=self.model_id,
                 language_code=audio_lang,
+                diarize=self.diarize,
             )
 
         words = getattr(response, "words", None)
@@ -80,6 +104,7 @@ class ScribeTranscribe:
         buffer: list[Any] = []
         buffer_start: float | None = None
         buffer_end: float | None = None
+        buffer_speaker: str | None = None
 
         def flush() -> Segment | None:
             nonlocal segment_id
@@ -97,6 +122,7 @@ class ScribeTranscribe:
                 end=buffer_end,
                 text=text,
                 words=word_timings or None,
+                speaker=buffer_speaker,
             )
             segment_id += 1
             return segment
@@ -105,10 +131,28 @@ class ScribeTranscribe:
             if word.type == "audio_event":
                 continue
 
+            speaker_id = getattr(word, "speaker_id", None)
+            speaker_changed = (
+                buffer
+                and speaker_id is not None
+                and buffer_speaker is not None
+                and speaker_id != buffer_speaker
+            )
+            if speaker_changed:
+                segment = flush()
+                if segment is not None:
+                    yield segment
+                buffer = []
+                buffer_start = None
+                buffer_end = None
+                buffer_speaker = None
+
             if word.type == "word":
                 if buffer_start is None:
                     buffer_start = word.start
                 buffer_end = word.end
+                if buffer_speaker is None and speaker_id is not None:
+                    buffer_speaker = speaker_id
 
             buffer.append(word)
 
@@ -129,6 +173,7 @@ class ScribeTranscribe:
                 buffer = []
                 buffer_start = None
                 buffer_end = None
+                buffer_speaker = None
 
         segment = flush()
         if segment is not None:
@@ -164,15 +209,19 @@ class Speak:
 
         self.client = build_client()
 
-    def __call__(self, text: str, out_path: Path, speed: float = 1.0) -> Path:
-        return self.speak(text, out_path, speed)
+    def __call__(
+        self, text: str, out_path: Path, speed: float = 1.0, voice: str | None = None
+    ) -> Path:
+        return self.speak(text, out_path, speed, voice)
 
-    def speak(self, text: str, out_path: Path, speed: float = 1.0) -> Path:
+    def speak(
+        self, text: str, out_path: Path, speed: float = 1.0, voice: str | None = None
+    ) -> Path:
         speed = max(_MIN_SPEED, min(_MAX_SPEED, speed))
         logger.info(f"Synthesising {len(text)} chars to {out_path} (speed={speed:.3f})")
 
         audio_chunks = self.client.text_to_speech.convert(
-            self.voice_id,
+            voice or self.voice_id,
             text=text,
             model_id=self.model_id,
             output_format=self.output_format,

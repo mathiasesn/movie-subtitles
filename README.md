@@ -119,6 +119,95 @@ Other flags: `--audio-lang`, `--srt-lang`, `--whisper-model`, `--mt-model`,
 `--dub-workers`, `--dub-correction-passes`. Run `movie-subtitles --help` for the
 full list.
 
+### Speaker-matched dub voices
+
+`--asr-engine elevenlabs` diarizes the audio (Scribe's `diarize=True`, on by
+default) and tags every `Segment` with a `speaker` label. Under `--dub`, this
+label drives which TTS voice speaks each line:
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--voice-match {off,clone,preset,auto}` | `auto` | How to pick a voice per diarized speaker |
+| `--keep-cloned-voices` | off | Do not delete ElevenLabs voices cloned this run; the retained voice ids are logged |
+| `--clone-min-seconds` | `30` | Minimum seconds of clean (non-overlapping) speech a speaker needs to be eligible for cloning; below this it falls back to a preset |
+| `--clone-target-seconds` | `60` | Maximum seconds of clean speech gathered per speaker to build a cloned voice sample |
+| `--voice-preset-table <path>` | none | JSON file overriding the built-in gender/age preset voice table |
+
+`--voice-match` modes:
+
+- **`off`** — the single configured voice speaks every line (today's pre-diarization
+  behaviour). No diarization work, sample extraction, or voice-matching import happens.
+- **`clone`** — instant-clones every eligible speaker's voice via ElevenLabs Instant
+  Voice Cloning (IVC). A speaker with fewer than `--clone-min-seconds` of clean audio,
+  or whose clone call fails, degrades to a preset voice instead of failing the run
+  (a WARNING names the speaker either way).
+- **`preset`** — never clones; classifies each speaker's sample and matches it to a
+  curated stock voice by (gender, age band).
+- **`auto`** (default) — clones when the resolved TTS engine supports it and the
+  speaker has enough clean audio, otherwise falls back to preset matching.
+
+**Cloning needs a plan that includes IVC.** ElevenLabs rejects
+`voices.ivc.create` with `paid_plan_required` on subscriptions without instant voice
+cloning; the run logs a WARNING and every speaker degrades to a preset voice, so
+`--voice-match auto` behaves as `preset` on such an account.
+
+**Cloning is ElevenLabs-only.** `--tts-engine openai` always gets preset voices,
+regardless of `--voice-match` — OpenAI's TTS has no cloning endpoint. Cloned voices
+are deleted automatically once the run finishes (including when the dub raises),
+unless `--keep-cloned-voices` is passed.
+
+For each speaker, clean audio is gathered by concatenating that speaker's segments
+that don't overlap any other speaker's segment, up to `--clone-target-seconds`. When
+classification is needed (preset matching, or a clone fallback), the same sample is
+run through a coarse heuristic classifier (median F0 via `librosa.pyin`, formants via
+`praat-parselmouth`) into one of six `gender:age_band` profiles, or "unknown" if
+either analysis fails or no clean audio was found. These thresholds are hand-picked,
+not tuned against a labelled dataset — treat the classification as a rough sort, not
+a reliable gender/age read.
+
+`--voice-preset-table` replaces the built-in table wholesale for the engines it
+names (no per-key merge — a supplied file must be complete for any engine it
+mentions). Schema:
+
+```json
+{
+  "elevenlabs": {
+    "female:young": "voice-id",
+    "female:adult": "voice-id",
+    "female:elderly": "voice-id",
+    "male:young": "voice-id",
+    "male:adult": "voice-id",
+    "male:elderly": "voice-id",
+    "default": "voice-id"
+  },
+  "openai": {
+    "female:young": "nova",
+    "...": "...",
+    "default": "alloy"
+  }
+}
+```
+
+Top-level keys must be `elevenlabs` or `openai`; each block's keys must be one of
+the six `gender:age_band` combinations (`female`/`male` × `young`/`adult`/`elderly`)
+or `default`, and every block must include `default`. Loading fails fast with a
+specific `ValueError` for malformed JSON, an unknown engine key, an unrecognised
+profile key, a non-string voice id, or a missing `default` — not a mid-dub
+`KeyError`.
+
+**`.srt` cue boundaries now split at speaker changes.** This is not limited to
+`--dub`: any `--asr-engine elevenlabs` run (with diarization on, the default) will
+produce more, shorter cues than before whenever a scene contains dialogue between
+multiple speakers, because a cue is flushed as soon as the diarized speaker changes.
+Plain `--asr-engine local`/`openai` runs are unaffected — they carry no speaker
+labels.
+
+**vs. `--managed`:** the ElevenLabs Dubbing job API used by `--managed` has always
+handled multi-speaker audio internally, including its own voice matching — none of
+this is needed there. `--voice-match` only applies to this repo's own
+transcribe→translate→dub pipeline (`--dub`), which had no notion of "who is
+speaking" until this feature.
+
 ### Dubbing notes
 
 - **Emitted `.srt` cue ends are padded, not raw ASR timings.** At write time, each cue's end is extended by up to `_CUE_PAD` (0.5s) toward the next cue's start (never past it, and never before the cue's own end) for subtitle readability. This applies to every `.srt` output, not only `--dub` runs; `dub.py` groups, anchors, and measures drift against the unpadded, word-accurate segment timings, so this only affects the written `.srt` file.

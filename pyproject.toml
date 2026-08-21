@@ -21,6 +21,15 @@ dependencies = [
     # main() loads .env before building any provider, so the API keys can live in a
     # gitignored file instead of being exported into every shell.
     "python-dotenv",
+    # speaker-voice classifier: noise-robust F0 estimation via librosa's pyin.
+    "librosa",
+    # speaker-voice classifier: Praat-based formant tracking (F1/F2).
+    "praat-parselmouth",
+    # voices.py:classify_voice imports numpy directly (np.isnan/np.median over the
+    # librosa/parselmouth outputs); it currently resolves transitively via librosa,
+    # but a directly-imported package must be declared per this repo's convention
+    # (see the accelerate entry above).
+    "numpy",
 ]
 
 [project.urls]

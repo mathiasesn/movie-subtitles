@@ -16,6 +16,12 @@ from movie_subtitles.providers.base import (
     TTSProvider,
 )
 from movie_subtitles.srt import format_block, pad_cue_end
+from movie_subtitles.voices import (
+    CLONE_MIN_SECONDS,
+    CLONE_TARGET_SECONDS,
+    VOICE_MATCH_MODES,
+    resolved_voices,
+)
 
 logger = logging.getLogger("cli")
 
@@ -27,9 +33,20 @@ def _positive_int(value: str) -> int:
     return n
 
 
+def _positive_float(value: str) -> float:
+    n = float(value)
+    if n <= 0:
+        raise ArgumentTypeError(f"must be > 0, got {n}")
+    return n
+
+
 # Assumption, not a measured value: rough average speaking rate used to derive a
 # character budget from a segment's duration. Tune this once real dubs are assessed.
 _CHARS_PER_SECOND = 15.0
+
+# Shared empty default for the `voices` kwarg -- a mutable literal default is a bugbear
+# violation (B006), so this module-level constant stands in for it; never mutated.
+_NO_VOICES: dict[str | None, str | None] = {}
 
 
 def _budget_chars(start: float, end: float) -> int:
@@ -38,7 +55,9 @@ def _budget_chars(start: float, end: float) -> int:
     return max(int(duration * _CHARS_PER_SECOND), 1)
 
 
-def _build_asr_provider(asr_engine: str, whisper_model_name: str) -> ASRProvider:
+def _build_asr_provider(
+    asr_engine: str, whisper_model_name: str, diarize: bool = True
+) -> ASRProvider:
     if asr_engine == "local":
         from movie_subtitles.providers.local import Transcribe
 
@@ -46,7 +65,15 @@ def _build_asr_provider(asr_engine: str, whisper_model_name: str) -> ASRProvider
     elif asr_engine == "elevenlabs":
         from movie_subtitles.providers.elevenlabs import ScribeTranscribe
 
-        return ScribeTranscribe()
+        # diarize is only meaningful (and only wired) here: it's Scribe requesting
+        # per-word speaker_id from the API, which _group_words then uses as a fourth
+        # cue-flush trigger. Wired from --voice-match rather than --dub, on purpose:
+        # the cue-splitting-on-speaker-change improvement to .srt output applies to
+        # plain (non-dub) elevenlabs runs too, and the docs advertise it -- so it
+        # must not be silently disabled just because --dub was not passed. Only an
+        # explicit --voice-match off, which promises byte-for-byte pre-diarization
+        # behaviour, turns it off.
+        return ScribeTranscribe(diarize=diarize)
     elif asr_engine == "openai":
         from movie_subtitles.providers.openai_ import OpenAITranscribe
 
@@ -105,9 +132,34 @@ def create_subtitles(
     tts_engine: str | None = None,
     dub_workers: int = 1,
     dub_correction_passes: int = 3,
+    voice_match: str = "auto",
+    keep_cloned_voices: bool = False,
+    clone_min_seconds: float = 30.0,
+    clone_target_seconds: float = 60.0,
+    voice_preset_table: str | Path | None = None,
 ) -> None:
     if isinstance(fpath, str):
         fpath = Path(fpath)
+
+    if clone_min_seconds > clone_target_seconds:
+        raise ValueError(
+            f"--clone-min-seconds ({clone_min_seconds}) is greater than "
+            f"--clone-target-seconds ({clone_target_seconds}), which makes cloning "
+            "unreachable: no speaker could ever gather enough clean audio to pass the "
+            "minimum before hitting the target. Lower --clone-min-seconds or raise "
+            "--clone-target-seconds."
+        )
+
+    # Validate a --voice-preset-table up front, alongside the min/target check above,
+    # rather than letting resolved_voices() reach load_preset_table() only after ASR and
+    # full translation have already run (potentially minutes of paid API calls). The
+    # parsed table is threaded straight into resolved_voices() below, so it is parsed
+    # exactly once and the file cannot change between this validation and its use.
+    presets = None
+    if voice_preset_table is not None:
+        from movie_subtitles.voices import load_preset_table
+
+        presets = load_preset_table(voice_preset_table)
 
     # --engine is the shorthand that sets all stages; --asr-engine/--translation-engine/
     # --tts-engine override it per stage (Goal 2 of specs/openai-api-key-support.md).
@@ -158,7 +210,9 @@ def create_subtitles(
         _check_ffmpeg_tools()
         tts = _build_tts_provider(resolved_tts_engine)
 
-    transcriber = _build_asr_provider(resolved_asr_engine, whisper_model_name)
+    transcriber = _build_asr_provider(
+        resolved_asr_engine, whisper_model_name, diarize=voice_match != "off"
+    )
     segments = transcriber(fpath, audio_lang)
 
     srt_lines = []
@@ -202,14 +256,25 @@ def create_subtitles(
     logger.info(f"Saved srt file to {srt_file}")
 
     if tts is not None:
-        _dub_and_mux(
+        with resolved_voices(
             fpath,
             dub_segments,
-            dub_translations,
-            tts,
-            dub_workers=dub_workers,
-            dub_correction_passes=dub_correction_passes,
-        )
+            tts_engine=resolved_tts_engine,
+            mode=voice_match,
+            clone_min_seconds=clone_min_seconds,
+            clone_target_seconds=clone_target_seconds,
+            presets=presets,
+            keep=keep_cloned_voices,
+        ) as voices_map:
+            _dub_and_mux(
+                fpath,
+                dub_segments,
+                dub_translations,
+                tts,
+                dub_workers=dub_workers,
+                dub_correction_passes=dub_correction_passes,
+                voices=voices_map,
+            )
 
 
 def _run_managed(fpath: Path, audio_lang: str, srt_lang: str) -> None:
@@ -279,6 +344,7 @@ def _dub_and_mux(
     tts: TTSProvider,
     dub_workers: int,
     dub_correction_passes: int,
+    voices: dict[str | None, str | None] = _NO_VOICES,
 ) -> None:
     from movie_subtitles.dub import synthesise_track
     from movie_subtitles.mux import mux_dub
@@ -294,6 +360,7 @@ def _dub_and_mux(
         aligner=aligner,
         max_workers=dub_workers,
         correction_passes=dub_correction_passes,
+        voices=voices,
     )
 
     dubbed_path = mux_dub(fpath, audio_track)
@@ -420,6 +487,57 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--voice-match",
+        type=str,
+        choices=list(VOICE_MATCH_MODES),
+        default="auto",
+        help=(
+            "How to pick TTS voices for diarized speakers during --dub: 'off' uses the "
+            "single configured voice (today's behaviour), 'clone' instant-clones each "
+            "speaker's voice via ElevenLabs IVC, 'preset' matches each speaker to a "
+            "curated stock voice by gender/age, and 'auto' clones when enough clean "
+            "audio is available for a speaker and falls back to a preset otherwise. "
+            "Ignored when the ASR engine does not diarize. Defaults to 'auto'"
+        ),
+    )
+    parser.add_argument(
+        "--keep-cloned-voices",
+        action="store_true",
+        help=(
+            "Do not delete ElevenLabs voices cloned for --voice-match clone/auto after "
+            "the run finishes; the retained voice ids are logged"
+        ),
+    )
+    parser.add_argument(
+        "--clone-min-seconds",
+        type=_positive_float,
+        default=CLONE_MIN_SECONDS,
+        help=(
+            "Minimum seconds of clean (non-overlapping) speech a speaker must have "
+            "before it is eligible for voice cloning; below this it falls back to a "
+            f"preset. Defaults to {CLONE_MIN_SECONDS}"
+        ),
+    )
+    parser.add_argument(
+        "--clone-target-seconds",
+        type=_positive_float,
+        default=CLONE_TARGET_SECONDS,
+        help=(
+            "Maximum seconds of clean speech gathered per speaker to build a cloned "
+            f"voice sample. Defaults to {CLONE_TARGET_SECONDS}"
+        ),
+    )
+    parser.add_argument(
+        "--voice-preset-table",
+        type=str,
+        default=None,
+        help=(
+            "Path to a JSON file overriding the built-in gender/age preset voice "
+            "table used by --voice-match preset/auto (see voices.py PROFILE_KEYS for "
+            "the recognised keys)"
+        ),
+    )
+    parser.add_argument(
         "--managed",
         action="store_true",
         help=(
@@ -445,6 +563,11 @@ def main() -> None:
             tts_engine=args.tts_engine,
             dub_workers=args.dub_workers,
             dub_correction_passes=args.dub_correction_passes,
+            voice_match=args.voice_match,
+            keep_cloned_voices=args.keep_cloned_voices,
+            clone_min_seconds=args.clone_min_seconds,
+            clone_target_seconds=args.clone_target_seconds,
+            voice_preset_table=args.voice_preset_table,
         )
     except (
         RuntimeError,

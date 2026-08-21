@@ -8,6 +8,8 @@ Guidance for AI coding agents working in this repository.
 
 `movie-subtitles` turns a video/audio file into a translated `.srt` file, and optionally into a dubbed video with a synthesised translated audio track. Engine values name vendors, not pipelines, and each stage is independently overridable: `--asr-engine {local,elevenlabs,openai}`, `--translation-engine {local,anthropic,openai}`, `--tts-engine {elevenlabs,openai}`. `--asr-engine openai` has a confirmed vendor limitation: `whisper-1`'s segment timestamps degrade to uniform 1.000s spans on music-heavy or dialogue-sparse audio (observed on a movie trailer; see the `OpenAITranscribe` docstring and `specs/fix-smoke-run-findings.md`), which corrupts both `.srt` cue timings and dub slots. Prefer `--asr-engine elevenlabs` on such material. `--engine {local,elevenlabs,openai}` is a shorthand that sets all three when the per-stage flags are not given — `local` is faster-whisper ASR → local MADLAD400 T5 translation, fully offline; `openai` is OpenAI ASR → OpenAI chat-completions translation → OpenAI TTS; `--engine elevenlabs` alone raises `ValueError`, since ElevenLabs has no standalone text-translation endpoint — `--translation-engine {anthropic,openai,local}` must be passed explicitly alongside it. `--dub` synthesises the translated segments with the resolved TTS provider, lays them out on a scene-anchored timeline, and muxes them over the source video with ffmpeg (rejected if the resolved TTS engine is unusable, e.g. `local` — a hard error; a translation stage resolving to `local` under `--dub` is milder, only warning and proceeding). Synthesis runs over a bounded `ThreadPoolExecutor` (`--dub-workers`, default 1 — i.e. serial by default; concurrency is opt-in because vendor concurrency caps are per-subscription and low, and a cap of 3 429s immediately at 8 workers with the lockstep retry unable to recover; values below 1 are rejected by argparse itself via a custom `_positive_int` type, not swallowed downstream). A group whose accumulated drift (synthesised speech total against summed source *speech* time, not wall-clock cue span) exceeds tolerance goes through a bounded corrective re-synthesis loop, `--dub-correction-passes` (default 3, also a `_positive_int`), rather than a single fixed retry — each pass resynthesises only the groups still outside tolerance, at a per-group clamped rate, and a group drops out once it's back in tolerance or a pass fails to improve it; `--dub-correction-passes 1` bounds correction to a single pass (not an exact reproduction of the old fixed single-retry behaviour, since the drift metric and pass-acceptance rule both changed). `--managed` bypasses this repo's pipeline entirely and calls the ElevenLabs Dubbing job API (create/poll/download) instead.
 
+`--asr-engine elevenlabs` diarizes by default (Scribe's `diarize=True`), and `_group_words` now also flushes a segment on speaker change, so `Segment.speaker` is populated for every cue — this is a visible behaviour change for **every** such run, dub or not: a multi-speaker scene now produces more, shorter `.srt` cues than before, since the boundary is speaker-change, not just punctuation/duration/length. Under `--dub`, `voice_match: str = "auto"` (`--voice-match {off,clone,preset,auto}`) resolves each diarized speaker to a TTS voice id via the `movie_subtitles/voices.py:resolved_voices` context manager, whose yielded mapping is threaded into `dub.synthesise_track(..., voices=...)` as a plain `speaker -> voice_id` dict. `off` keeps today's single-voice behaviour; `clone` instant-clones each speaker via ElevenLabs IVC (ElevenLabs-only — `--tts-engine openai` always gets a preset, in every mode); `preset` classifies each speaker (gender/age band, via a `librosa`+`praat-parselmouth` heuristic) and looks up a curated stock voice, never cloning; `auto` (default) clones when the TTS engine supports it and the speaker has enough clean audio, else falls back to preset. `--clone-min-seconds` (30) / `--clone-target-seconds` (60) bound how much non-overlapping clean audio per speaker is gathered and required; a speaker with too little clean audio, or whose clone call fails, degrades to a preset rather than failing the run. `--voice-preset-table <json>` replaces the built-in preset table wholesale for the engines it names, validated strictly at load time. Cloned voices are deleted after the run (in a `finally`, so this happens even when the dub raises) unless `--keep-cloned-voices` is passed.
+
 Note: the original README advertised burned-in per-frame subtitles. That was never implemented and has been removed from the README — `.srt`, and with `--dub`/`--managed` a dubbed video, are the only output paths.
 
 ## Layout
@@ -36,16 +38,28 @@ movie_subtitles/
                     # providers/fallback.py, not here
   mux.py           # mux_dub(): overlays the finished audio track over the source video
                     # with ffmpeg, replacing (not mixing with) the original audio track
+  voices.py        # --voice-match speaker -> TTS voice id resolution: a single sweep
+                    # (_clean_segments_by_speaker) computes every speaker's clean
+                    # (non-overlapping) segment set up front, extract_speaker_sample()
+                    # cuts each speaker's clean clips in one ffmpeg atrim/concat
+                    # filtergraph pass, classify_voice() runs the sample (decoded once)
+                    # through librosa (F0) + parselmouth (formants) into a gender/age
+                    # profile (lazy imports, degrades to "unknown" rather than raising),
+                    # and resolved_voices() -- a context manager -- ties cloning
+                    # (ElevenLabs IVC only) and preset lookup together per --voice-match
+                    # mode, deleting every voice it cloned on exit (success, a raise
+                    # during resolution, or a raise from the caller's `with` body) unless
+                    # told to keep them
   ffmpeg.py         # audio_codec_for() container->codec table + run(): the one place that
                     # invokes ffmpeg and turns a non-zero exit into a RuntimeError quoting
-                    # its stderr, shared by dub.py and mux.py
+                    # its stderr, shared by dub.py, mux.py and voices.py
   dubbing.py        # ManagedDub: the --managed path, independent of the rest
   providers/
     base.py          # Word (frozen: start/end/text) + Segment dataclass (start/end/
-                      # text plus an optional `words: list[Word] | None` populated only
-                      # by ScribeTranscribe) + ASRProvider / TranslationProvider /
-                      # TTSProvider / AlignmentProvider Protocols -- pure type
-                      # surface, no behaviour
+                      # text plus optional `words: list[Word] | None` and `speaker:
+                      # str | None`, both populated only by ScribeTranscribe) +
+                      # ASRProvider / TranslationProvider / TTSProvider /
+                      # AlignmentProvider Protocols -- pure type surface, no behaviour
     fallback.py       # FallbackAlign: composes AlignmentProviders into a
                       # thread-safe degrade chain; no vendor SDK imports
     local.py          # Transcribe (faster-whisper) + Translate (MADLAD400 T5)
@@ -97,6 +111,10 @@ CI (`.github/workflows/ci.yml`) runs those two ruff checks and nothing else — 
 
 `accelerate` is a runtime dependency: `providers/local.py` loads the MADLAD400 model with `device_map="auto"`, which `transformers` only accepts when `accelerate` is installed — without it, `--engine local` cannot translate.
 
+`librosa` and `praat-parselmouth` are runtime dependencies of `voices.py:classify_voice`: `librosa.pyin` gives a noise-robust median F0 (the primary gender cue) and `praat-parselmouth`'s formant tracking (F1/F2) refines gender and splits age bands. Both are imported lazily inside `classify_voice`, not at module top level, so `--voice-match off` (and any code path that never classifies) never pays their import cost.
+
 ## Things that don't exist yet
 
-No tests, no test framework, no config file, and no environment variable beyond `ELEVENLABS_API_KEY`/`ANTHROPIC_API_KEY`/`OPENAI_API_KEY` (see `.env.example` at the repo root, which holds placeholders for all three). Those three are loaded from `.env` by `cli._load_env()`, called from `main()` only — `find_dotenv(usecwd=True)` so discovery is anchored to the user's cwd rather than to the installed package, and already-exported variables are never overridden. Importing any module still reads no `.env`; library callers set the environment themselves. There is now a minimal error-handling layer at the `main()` boundary (`RuntimeError | ValueError | FileNotFoundError | TimeoutError | subprocess.CalledProcessError` caught and turned into a one-line message + `SystemExit(1)`); anything else still propagates as a traceback. If asked to add tests, that means introducing pytest and a `tests/` directory from scratch — don't go looking for existing ones.
+No tests, no test framework, and no environment variable beyond `ELEVENLABS_API_KEY`/`ANTHROPIC_API_KEY`/`OPENAI_API_KEY` (see `.env.example` at the repo root, which holds placeholders for all three). Those three are loaded from `.env` by `cli._load_env()`, called from `main()` only — `find_dotenv(usecwd=True)` so discovery is anchored to the user's cwd rather than to the installed package, and already-exported variables are never overridden. Importing any module still reads no `.env`; library callers set the environment themselves. There is now a minimal error-handling layer at the `main()` boundary (`RuntimeError | ValueError | FileNotFoundError | TimeoutError | subprocess.CalledProcessError` caught and turned into a one-line message + `SystemExit(1)`); anything else still propagates as a traceback. If asked to add tests, that means introducing pytest and a `tests/` directory from scratch — don't go looking for existing ones.
+
+There **is** now a config file: `--voice-preset-table` takes a path to a JSON file (schema: top-level keys are TTS engine names, each mapping `gender:age_band`/`default` profile keys to a voice id string) that replaces `voices.py`'s built-in preset table wholesale for the engines it names. `voices.py:load_preset_table` validates it strictly at load time — malformed JSON, an unrecognised engine or profile key, a non-string voice id, or a missing `default` entry all raise `ValueError` before any dub work starts, rather than surfacing as a mid-dub `KeyError`.

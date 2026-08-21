@@ -1,4 +1,5 @@
 import subprocess
+from pathlib import Path
 
 # Matroska/MP4 take AAC, but WebM's spec only admits Vorbis and Opus: handing it
 # `-c:a aac` makes ffmpeg fail at header-write time with a bare "Invalid argument"
@@ -36,3 +37,27 @@ def run(cmd: list[str], *, what: str) -> subprocess.CompletedProcess[str]:
         raise RuntimeError(f"{what} failed (ffmpeg exit {result.returncode}):\n{tail}")
 
     return result
+
+
+def probe_duration(fpath: Path) -> float:
+    """Measure a media file's actual duration via ffprobe.
+
+    Used wherever a requested cut/synthesis length must not be trusted at face value
+    (an `-ss`/`-t` cut can run past the source's actual end, or a TTS clip's container
+    duration is the only thing worth trusting) -- the seconds reported must come from
+    the produced file itself.
+    """
+    result = run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(fpath),
+        ],
+        what=f"Probing the duration of {fpath.name}",
+    )
+    return float(result.stdout.strip())
