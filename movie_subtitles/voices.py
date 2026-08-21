@@ -260,6 +260,22 @@ def extract_speaker_sample(
 # ample for a stable median F0 and coarse formant estimate.
 _CLASSIFY_MAX_SECONDS = 15.0
 
+# Below this the F0 estimate is treated as unreliable rather than as a very deep
+# voice: pyin clamps at its own fmin, and music or rumble under the dialogue drags
+# the median onto that floor. Kept above librosa's C2 (65.4 Hz) fmin for that reason.
+_MIN_TRUSTED_F0 = 70.0
+
+# F0 band where gender cannot be read off pitch alone (a low female or a high male);
+# inside it the formant average decides, since a longer vocal tract lowers F1/F2.
+_AMBIGUOUS_F0_LOW = 150.0
+_AMBIGUOUS_F0_HIGH = 185.0
+_AMBIGUOUS_FORMANT_AVG = 1300.0
+
+# (young_cut, elderly_cut) per gender: at or above young_cut is "young", below
+# elderly_cut is "elderly", between them is "adult". Female and male F0 ranges barely
+# overlap, so the cuts are per gender rather than shared.
+_AGE_CUTS = {"female": (250.0, 175.0), "male": (145.0, 95.0)}
+
 
 def classify_voice(sample_path: str | Path) -> tuple[str, str] | None:
     """Classify a sample WAV into a coarse (gender, age_band) profile.
@@ -290,7 +306,7 @@ def classify_voice(sample_path: str | Path) -> tuple[str, str] | None:
 
         f0, voiced_flag, _ = librosa.pyin(
             y,
-            fmin=float(librosa.note_to_hz("C2")),
+            fmin=_MIN_TRUSTED_F0,
             fmax=float(librosa.note_to_hz("C6")),
             sr=sr,
         )
@@ -317,20 +333,37 @@ def classify_voice(sample_path: str | Path) -> tuple[str, str] | None:
         )
         return None
 
-    # Coarse, heuristic thresholds: F0 is the primary gender cue, formants (which
-    # track vocal-tract length) refine it and separate the age bands. These are not
-    # tuned against a labelled dataset -- see specs/speaker-matched-dub-voices.md's
-    # "Risks" section.
-    gender = "female" if median_f0 >= 165.0 else "male"
+    # Coarse, heuristic thresholds, NOT tuned against a labelled dataset -- see
+    # specs/speaker-matched-dub-voices.md's "Risks" section.
+    #
+    # F0 is the primary gender cue. Formants only disambiguate the band where F0
+    # alone is unreliable (roughly a low female or a high male voice): a longer
+    # vocal tract lowers F1/F2, so low formants there argue male. Formants are
+    # deliberately NOT used as an age cue. An earlier revision banded age on
+    # (F1+F2)/2, with <= 1400 meaning "elderly"; measured on real speech that
+    # average sits around 1200-1350 for every speaker, so "elderly" swallowed
+    # everyone whose F0 missed the "young" cut and "adult" -- the commonest case --
+    # was unreachable.
+    if _AMBIGUOUS_F0_LOW <= median_f0 < _AMBIGUOUS_F0_HIGH:
+        gender = "female" if (median_f1 + median_f2) / 2.0 >= _AMBIGUOUS_FORMANT_AVG else "male"
+    else:
+        gender = "female" if median_f0 >= _AMBIGUOUS_F0_HIGH else "male"
 
-    formant_avg = (median_f1 + median_f2) / 2.0
-    if median_f0 >= 220.0 or formant_avg >= 2200.0:
+    # Age bands are read off F0 relative to that gender's own range, since male and
+    # female F0 distributions barely overlap. Pitch rises toward the child end and
+    # falls with age, so each band is just a cut on the speaker's own scale.
+    young_cut, elderly_cut = _AGE_CUTS[gender]
+    if median_f0 >= young_cut:
         age_band = "young"
-    elif median_f0 <= 110.0 or formant_avg <= 1400.0:
+    elif median_f0 < elderly_cut:
         age_band = "elderly"
     else:
         age_band = "adult"
 
+    logger.debug(
+        f"Classified {sample_path.name}: F0={median_f0:.1f}Hz F1={median_f1:.1f}Hz "
+        f"F2={median_f2:.1f}Hz -> {gender}:{age_band}"
+    )
     return gender, age_band
 
 
