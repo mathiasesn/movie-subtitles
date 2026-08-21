@@ -63,6 +63,48 @@ def probe_duration(fpath: Path) -> float:
     return float(result.stdout.strip())
 
 
+_UNKNOWN_CHANNEL_LAYOUT_FALLBACK = "stereo"
+
+# ffprobe can also report an empty/non-numeric sample_rate; 48 kHz is the safe default.
+_UNKNOWN_SAMPLE_RATE_FALLBACK = 48000
+
+
+def probe_audio_format(fpath: Path) -> tuple[str, int]:
+    """The first audio stream's `(channel_layout, sample_rate)`, per ffprobe.
+
+    Used to make a dub mux match the source's own channel layout/sample rate instead of
+    forcing a fixed one. ffprobe sometimes reports an empty `channel_layout` (e.g. for
+    some containers/codecs it can't derive one from just the channel count), in which
+    case that would be an invalid `aformat` argument -- callers get
+    `_UNKNOWN_CHANNEL_LAYOUT_FALLBACK` instead.
+    """
+    result = run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=sample_rate,channel_layout",
+            "-of",
+            "default=noprint_wrappers=1",
+            str(fpath),
+        ],
+        what=f"Probing the audio format of {fpath.name}",
+    )
+    # Keyed output (no `nokey=1`): ffprobe emits `default` fields in its own internal
+    # order, not the order -show_entries asked for, so parsing by position would silently
+    # swap the two values if that order ever changed.
+    fields = dict(line.split("=", 1) for line in result.stdout.strip().splitlines() if "=" in line)
+    rate = fields.get("sample_rate", "").strip()
+    sample_rate = int(rate) if rate.isdigit() else _UNKNOWN_SAMPLE_RATE_FALLBACK
+    channel_layout = fields.get("channel_layout", "").strip()
+    if not channel_layout or channel_layout == "unknown":
+        channel_layout = _UNKNOWN_CHANNEL_LAYOUT_FALLBACK
+    return channel_layout, sample_rate
+
+
 def has_audio_stream(fpath: Path) -> bool:
     """Whether `fpath` has at least one audio stream, per ffprobe.
 

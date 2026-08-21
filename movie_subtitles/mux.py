@@ -2,7 +2,7 @@ import logging
 import shutil
 from pathlib import Path
 
-from movie_subtitles.ffmpeg import audio_codec_for, has_audio_stream
+from movie_subtitles.ffmpeg import audio_codec_for, has_audio_stream, probe_audio_format
 from movie_subtitles.ffmpeg import run as run_ffmpeg
 
 logger = logging.getLogger("mux")
@@ -17,6 +17,7 @@ _DUCK_LEVEL = 0.25
 # full-scale inputs summed can clip, so each is pre-attenuated; this is a fixed
 # module-level guard, not a tunable.
 _MIX_INPUT_GAIN = 0.7
+
 
 # `volume`'s expression is one ffmpeg argv token; a single filter built from hundreds of
 # `between(...)` terms risks exceeding practical expression/argv limits. Spans are
@@ -99,23 +100,33 @@ def mux_dub(
         ]
     else:
         spans = speech_spans or []
-        filters = _ducking_filters(spans)
+        duck_filters = _ducking_filters(spans)
 
         orig_label = "0:a:0"
-        for i, expr in enumerate(filters):
+        chained_filters = []
+        for i, expr in enumerate(duck_filters):
             next_label = f"duck{i}"
-            filters[i] = f"[{orig_label}]{expr}[{next_label}]"
+            chained_filters.append(f"[{orig_label}]{expr}[{next_label}]")
             orig_label = next_label
 
-        gain_a = (
-            f"[{orig_label}]volume={_MIX_INPUT_GAIN}[origmix]"
-            if filters
-            else (f"[0:a:0]volume={_MIX_INPUT_GAIN}[origmix]")
+        # Target the *source's* own channel layout/sample rate rather than a fixed
+        # stereo/48kHz pair -- this whole feature exists to preserve the original
+        # audio, so silently downmixing e.g. a 5.1 soundtrack to stereo would be a
+        # fidelity regression. `amix` negotiates a common format itself when inputs
+        # disagree, but that negotiation is implicit and version-dependent, so both
+        # branches are still explicitly formatted to the same target: the original
+        # branch is already in that format almost by definition (it's where the
+        # target came from), and formatting it too keeps the graph deterministic
+        # rather than relying on amix's own negotiation for that branch.
+        channel_layout, sample_rate = probe_audio_format(video_path)
+        fmt = (
+            f"aformat=sample_fmts=fltp:sample_rates={sample_rate}:channel_layouts={channel_layout}"
         )
-        gain_b = f"[1:a:0]volume={_MIX_INPUT_GAIN}[dubmix]"
+        gain_a = f"[{orig_label}]volume={_MIX_INPUT_GAIN},{fmt}[origmix]"
+        gain_b = f"[1:a:0]volume={_MIX_INPUT_GAIN},{fmt}[dubmix]"
+        mix = "[origmix][dubmix]amix=inputs=2:normalize=0[out]"
 
-        filter_complex = ";".join([*filters, gain_a, gain_b])
-        filter_complex += ";[origmix][dubmix]amix=inputs=2:normalize=0[out]"
+        filter_complex = ";".join([*chained_filters, gain_a, gain_b, mix])
 
         cmd = base_cmd + [
             "-filter_complex",

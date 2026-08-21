@@ -57,8 +57,10 @@ _NO_VOICES: dict[str | None, str | None] = {}
 _TTS_MAX_ATTEMPTS = 3
 
 # Pre/post pad applied to each placed speech span before coalescing, so ducking (in
-# mux.py) fades in slightly ahead of the dub's speech and releases slightly after it,
-# rather than snapping exactly on the measured boundary.
+# mux.py) steps down slightly ahead of the dub's speech and steps back up slightly
+# after it, rather than snapping exactly on the measured boundary. The step itself
+# stays instantaneous (mux.py's `volume` expression is a hard if/else, not a ramp) --
+# this only shifts where that step falls.
 _SPAN_PAD = 0.15
 
 
