@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
 
+from movie_subtitles.ffmpeg import probe_duration
 from movie_subtitles.ffmpeg import run as run_ffmpeg
 
 # Tolerance, in seconds, for treating a silencedetect interval as touching a clip's edge
@@ -78,23 +79,6 @@ def _boundaries_from_intervals(
     return speech_start, speech_end
 
 
-def _probe_duration(fpath: Path) -> float:
-    result = run_ffmpeg(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(fpath),
-        ],
-        what=f"Probing the duration of {fpath.name}",
-    )
-    return float(result.stdout.strip())
-
-
 class SilenceAlign:
     """Find real speech boundaries in a studio-clean TTS clip via ffmpeg `silencedetect`.
 
@@ -127,7 +111,7 @@ class SilenceAlign:
 
         duration = _parse_duration(stderr_text)
         if duration is None:
-            duration = _probe_duration(clip)
+            duration = probe_duration(clip)
 
         return _boundaries_from_intervals(_parse_silence_intervals(stderr_text), duration)
 
@@ -143,4 +127,4 @@ class DurationAlign:
         return self.align(clip, text)
 
     def align(self, clip: Path, text: str) -> tuple[float, float]:
-        return 0.0, _probe_duration(clip)
+        return 0.0, probe_duration(clip)

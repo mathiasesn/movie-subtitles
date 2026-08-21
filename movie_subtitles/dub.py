@@ -48,6 +48,10 @@ _MAX_CORRECTION_PASSES = 3
 # resolved TTS vendor's plan actually allows.
 _MAX_WORKERS = 1
 
+# Shared empty default for the `voices` kwarg -- a mutable literal default is a bugbear
+# violation (B006), so this module-level constant stands in for it; never mutated.
+_NO_VOICES: dict[str | None, str | None] = {}
+
 # Bounded retry around the TTS call: up to this many attempts, with an exponential
 # 2**(attempt-1) second backoff between them (1s, 2s, ...).
 _TTS_MAX_ATTEMPTS = 3
@@ -253,7 +257,7 @@ def _submit_group(
     work_dir: Path,
     rate: float,
     pass_num: int,
-    voices: dict[str | None, str | None] | None,
+    voices: dict[str | None, str | None] = _NO_VOICES,
 ) -> list[Future[_Clip]]:
     """Submit every segment of `group` to `executor` at `rate` for pass `pass_num`, in
     group order.
@@ -277,7 +281,7 @@ def _submit_group(
             work_dir,
             rate,
             pass_num,
-            voices.get(segment.speaker) if voices is not None else None,
+            voices.get(segment.speaker),
         )
         for segment in group
     ]
@@ -424,7 +428,7 @@ def synthesise_track(
     aligner: AlignmentProvider,
     max_workers: int = _MAX_WORKERS,
     correction_passes: int = _MAX_CORRECTION_PASSES,
-    voices: dict[str | None, str | None] | None = None,
+    voices: dict[str | None, str | None] = _NO_VOICES,
 ) -> Path:
     """Synthesise translated segments and assemble them onto a silent timeline.
 

@@ -5,13 +5,15 @@ both the `elevenlabs` (instant voice cloning + curated presets) and `openai` (pr
 only) TTS engines. See `specs/speaker-matched-dub-voices.md` for the design.
 """
 
+import heapq
 import json
 import logging
 import tempfile
-from contextlib import suppress
-from dataclasses import dataclass, field
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
+from movie_subtitles.ffmpeg import probe_duration
 from movie_subtitles.ffmpeg import run as run_ffmpeg
 from movie_subtitles.providers.base import Segment
 
@@ -142,153 +144,121 @@ def _preset_voice(
     return engine_table.get(key, engine_table.get("default"))
 
 
-def _segments_overlap(a: Segment, b: Segment) -> bool:
-    return a.start < b.end and b.start < a.end
+def _clean_segments_by_speaker(segments: list[Segment]) -> dict[str, list[Segment]]:
+    """Compute every speaker's "clean" (non-overlapped) segment set in one sweep.
 
-
-def _probe_duration(fpath: Path) -> float:
-    """Measure a produced audio file's actual duration via ffprobe.
-
-    Mirrors `providers/ffmpeg_align.py:_probe_duration` (that one is module-private,
-    so this is a small, deliberate duplication rather than reaching into another
-    module's private helper) -- the repo already measures duration this way rather
-    than trusting a requested cut length, and the same reasoning applies here: an
-    `-ss`/`-t` cut can run past the source's actual end, so the seconds gathered must
-    come from the produced file, not the requested `take`.
+    A segment disqualifies itself (for whichever speaker it belongs to) as soon as it
+    overlaps in time with any segment carrying a *different* `speaker` value -- an
+    unlabelled segment (`speaker is None`) counts as disqualifying too, since it may
+    belong to an unrecognised speaker and must not be allowed to co-occur with a
+    "clean" clip. That test is speaker-agnostic per segment (it only depends on the pair
+    of labels involved), so it can be computed once for the whole segment list with a
+    single start-sorted sweep over a min-heap of still-active segments, rather than
+    rescanning every other segment for each of a speaker's own segments (the previous
+    O(speakers * n^2) shape).
     """
-    result = run_ffmpeg(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(fpath),
-        ],
-        what=f"Probing the duration of {fpath.name}",
-    )
-    return float(result.stdout.strip())
+    order = sorted(range(len(segments)), key=lambda i: segments[i].start)
+    overlaps = [False] * len(segments)
+
+    active: list[tuple[float, int]] = []  # (end, index), heap ordered by end
+    for i in order:
+        seg = segments[i]
+        while active and active[0][0] <= seg.start:
+            heapq.heappop(active)
+        for _end, j in active:
+            other = segments[j]
+            if other.speaker != seg.speaker:
+                overlaps[i] = True
+                overlaps[j] = True
+        heapq.heappush(active, (seg.end, i))
+
+    by_speaker: dict[str, list[Segment]] = {}
+    for i, seg in enumerate(segments):
+        if seg.speaker is not None and not overlaps[i]:
+            by_speaker.setdefault(seg.speaker, []).append(seg)
+    for speaker_segments in by_speaker.values():
+        speaker_segments.sort(key=lambda s: s.start)
+    return by_speaker
 
 
 def extract_speaker_sample(
     source: str | Path,
     speaker: str,
-    segments: list[Segment],
+    clean_segments: list[Segment],
     *,
     target_seconds: float = CLONE_TARGET_SECONDS,
     out_dir: str | Path | None = None,
-) -> tuple[Path, float]:
-    """Extract up to `target_seconds` of clean audio for one speaker.
+) -> tuple[Path | None, float]:
+    """Extract up to `target_seconds` of clean audio for one speaker, in one ffmpeg pass.
 
-    Selects `speaker`'s segments where no other speaker's segment overlaps in time,
-    cuts each from `source` with ffmpeg as WAV, and concatenates them (via ffmpeg's
-    concat demuxer) in start order until `target_seconds` is reached or the clean
-    segments run out. Returns the concatenated sample path and the seconds actually
-    gathered (which may be less than `target_seconds`).
+    `clean_segments` is `speaker`'s already-computed, start-sorted, non-overlapping
+    segment list (see `_clean_segments_by_speaker`). Clips are taken in start order
+    until `target_seconds` is reached or the clean segments run out, and cut out of
+    `source` with a single `atrim`/`concat` filtergraph over one input, written
+    directly to a mono 16 kHz WAV -- avoiding a separate ffmpeg invocation (and a full
+    decode of `source` from frame 0, since plain `-ss` after `-i` seeks by decoding)
+    per clip, plus a second concat pass.
 
-    Produced once per speaker regardless of whether cloning or preset matching ends
-    up consuming it.
+    Returns `(None, 0.0)` if no clean audio exists for this speaker at all. Otherwise
+    returns the produced sample's path and the seconds actually gathered, measured from
+    the produced file via `probe_duration` -- not the requested cut length, since an
+    `-ss`/`-t` cut can run past the source's actual end.
     """
     source = Path(source)
     workdir = Path(out_dir) if out_dir is not None else Path(tempfile.mkdtemp(prefix="voices-"))
     workdir.mkdir(parents=True, exist_ok=True)
 
-    own_segments = sorted((s for s in segments if s.speaker == speaker), key=lambda s: s.start)
-    # Unlabelled segments (speaker is None) are treated as disqualifying overlaps, not
-    # excluded: an unlabelled stretch is exactly the ambiguous case the "no other
-    # speaker overlaps" rule exists to rule out -- it may belong to a different,
-    # unrecognised speaker, so it must not be allowed to co-occur with a "clean" clip.
-    other_segments = [s for s in segments if s.speaker != speaker]
-
-    clean = [
-        s for s in own_segments if not any(_segments_overlap(s, other) for other in other_segments)
-    ]
-
-    gathered = 0.0
-    clip_paths: list[Path] = []
-    for i, seg in enumerate(clean):
-        if gathered >= target_seconds:
+    selected: list[tuple[float, float]] = []
+    requested = 0.0
+    for seg in clean_segments:
+        if requested >= target_seconds:
             break
         duration = seg.end - seg.start
         if duration <= 0:
             continue
+        take = min(duration, target_seconds - requested)
+        selected.append((seg.start, seg.start + take))
+        requested += take
 
-        take = min(duration, target_seconds - gathered)
-        clip_path = workdir / f"{speaker}_{i}.wav"
-        run_ffmpeg(
-            [
-                "ffmpeg",
-                "-y",
-                "-i",
-                str(source),
-                "-ss",
-                f"{seg.start:.3f}",
-                "-t",
-                f"{take:.3f}",
-                "-vn",
-                "-ac",
-                "1",
-                "-ar",
-                "16000",
-                "-acodec",
-                "pcm_s16le",
-                str(clip_path),
-            ],
-            what=f"extracting sample clip for speaker {speaker!r}",
-        )
-        clip_paths.append(clip_path)
-        # Measure what ffmpeg actually produced, not the requested `take`: a cut
-        # requested near the source's end can run short of it (e.g. `-t` extends past
-        # EOF), which would otherwise overstate `gathered` and let a speaker clear
-        # --clone-min-seconds on less real audio than reported.
-        gathered += _probe_duration(clip_path)
+    if not selected:
+        return None, 0.0
+
+    atrim_filters = [
+        f"[0:a]atrim=start={start:.3f}:end={end:.3f}[a{i}]"
+        for i, (start, end) in enumerate(selected)
+    ]
+    concat_inputs = "".join(f"[a{i}]" for i in range(len(selected)))
+    filter_complex = (
+        ";".join(atrim_filters) + f";{concat_inputs}concat=n={len(selected)}:v=0:a=1[out]"
+    )
 
     sample_path = workdir / f"{speaker}_sample.wav"
-    if not clip_paths:
-        # No clean audio at all: still produce an (empty) file so callers have a
-        # uniform return type; classification/cloning downstream must handle 0.0
-        # gathered seconds as "ineligible" rather than treat this as an error.
-        run_ffmpeg(
-            [
-                "ffmpeg",
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-                "anullsrc=r=16000:cl=mono",
-                "-t",
-                "0.01",
-                str(sample_path),
-            ],
-            what=f"writing empty sample placeholder for speaker {speaker!r}",
-        )
-        return sample_path, 0.0
-
-    if len(clip_paths) == 1:
-        clip_paths[0].rename(sample_path)
-        return sample_path, gathered
-
-    concat_list = workdir / f"{speaker}_concat.txt"
-    concat_list.write_text("\n".join(f"file '{p.resolve()}'" for p in clip_paths) + "\n")
     run_ffmpeg(
         [
             "ffmpeg",
             "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
             "-i",
-            str(concat_list),
-            "-c",
-            "copy",
+            str(source),
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[out]",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-acodec",
+            "pcm_s16le",
             str(sample_path),
         ],
-        what=f"concatenating sample clips for speaker {speaker!r}",
+        what=f"extracting sample for speaker {speaker!r}",
     )
-    return sample_path, gathered
+    return sample_path, probe_duration(sample_path)
+
+
+# Bounded so classify_voice never decodes an entire (potentially long) sample: 15s is
+# ample for a stable median F0 and coarse formant estimate.
+_CLASSIFY_MAX_SECONDS = 15.0
 
 
 def classify_voice(sample_path: str | Path) -> tuple[str, str] | None:
@@ -297,9 +267,12 @@ def classify_voice(sample_path: str | Path) -> tuple[str, str] | None:
     Uses `librosa.pyin` for a noise-robust median F0 and `praat-parselmouth` for
     F1/F2 formants. Both libraries are imported lazily, inside this function, so
     `--voice-match off` (and any run that never classifies) never pays their import
-    cost. Degrades to `None` (an "unknown" profile) rather than raising if either
-    analysis fails -- movie audio is noisy and a bad sample must fall back to the
-    default preset, not abort the run.
+    cost. The sample is decoded once (bounded to `_CLASSIFY_MAX_SECONDS`) and the
+    resulting array is handed to both analyses -- `parselmouth.Sound` is built from
+    the already-decoded samples rather than re-reading the file from disk itself.
+    Degrades to `None` (an "unknown" profile) rather than raising if either analysis
+    fails -- movie audio is noisy and a bad sample must fall back to the default
+    preset, not abort the run.
     """
     try:
         import librosa
@@ -311,7 +284,7 @@ def classify_voice(sample_path: str | Path) -> tuple[str, str] | None:
 
     sample_path = Path(sample_path)
     try:
-        y, sr = librosa.load(str(sample_path), sr=None, mono=True)
+        y, sr = librosa.load(str(sample_path), sr=None, mono=True, duration=_CLASSIFY_MAX_SECONDS)
         if y.size == 0:
             raise ValueError("empty sample audio")
 
@@ -327,7 +300,7 @@ def classify_voice(sample_path: str | Path) -> tuple[str, str] | None:
             raise ValueError("no voiced frames detected")
         median_f0 = float(np.median(voiced_f0))
 
-        snd = parselmouth.Sound(str(sample_path))
+        snd = parselmouth.Sound(y, sampling_frequency=sr)
         formant = snd.to_formant_burg()
         times = np.arange(formant.xmin, formant.xmax, 0.01)
         f1_values = [formant.get_value_at_time(1, t) for t in times]
@@ -361,136 +334,11 @@ def classify_voice(sample_path: str | Path) -> tuple[str, str] | None:
     return gender, age_band
 
 
-@dataclass
-class VoiceResolution:
-    """Result of `resolve_voices`: the speaker -> voice-id mapping, plus bookkeeping
-    the caller needs to clean up any voices this call cloned."""
-
-    voices: dict[str | None, str | None]
-    cloned_voice_ids: list[str] = field(default_factory=list)
-
-
-def resolve_voices(
-    source: str | Path,
-    segments: list[Segment],
-    *,
-    tts_engine: str,
-    mode: str = "auto",
-    clone_min_seconds: float = CLONE_MIN_SECONDS,
-    clone_target_seconds: float = CLONE_TARGET_SECONDS,
-    preset_table_path: str | Path | None = None,
-    voice_name_prefix: str = "movie-subtitles",
-) -> VoiceResolution:
-    """Resolve a speaker -> TTS voice id mapping for `--dub`, honouring `--voice-match`.
-
-    - `mode="off"`: returns an all-empty mapping. Does no diarization work, sample
-      extraction, or lazy import -- byte-for-byte today's (pre-diarization) behaviour.
-    - `mode="clone"`: clones every eligible speaker (ElevenLabs IVC only). A speaker
-      with fewer than `clone_min_seconds` of clean audio falls back to a preset, with
-      a WARNING naming the speaker and the seconds actually found.
-    - `mode="preset"`: classifies each speaker and picks a preset voice; never clones.
-    - `mode="auto"`: clones when `tts_engine` supports cloning (elevenlabs), otherwise
-      (and for any speaker ineligible to clone) falls back to preset matching.
-
-    Cloning is never attempted for `tts_engine="openai"` in any mode.
-
-    Returns a `VoiceResolution` carrying both the mapping and the list of voice ids
-    this call cloned, so the caller can delete them (via `cleanup_cloned_voices`) in a
-    `finally` once the dub is done.
-    """
-    if mode not in VOICE_MATCH_MODES:
-        raise ValueError(f"Unknown voice-match mode {mode!r} (expected one of {VOICE_MATCH_MODES})")
-
-    if mode == "off":
-        return VoiceResolution(voices={})
-
-    speakers = sorted({s.speaker for s in segments if s.speaker is not None})
-    if not speakers:
-        logger.info("No segment carries a speaker label; dubbing with a single voice")
-        return VoiceResolution(voices={})
-
-    presets = (
-        _DEFAULT_PRESETS if preset_table_path is None else load_preset_table(preset_table_path)
-    )
-
-    can_clone = tts_engine in _CLONE_CAPABLE_ENGINES
-    want_clone = mode == "clone" or (mode == "auto" and can_clone)
-
-    voices: dict[str | None, str | None] = {}
-    cloned_ids: list[str] = []
-
-    client = None
-    if want_clone and can_clone:
-        from movie_subtitles.providers.elevenlabs import build_client
-
-        client = build_client()
-
-    # A speaker's clone succeeds by mutating the ElevenLabs account (client.voices.ivc
-    # .create) immediately -- there is no way to "undo" that except an explicit delete.
-    # If a later speaker's extract_speaker_sample/clone_voice call raises (e.g. an
-    # ffmpeg failure), the exception below would otherwise propagate straight out of
-    # this function, and `cloned_ids` -- along with every voice slot it names -- would
-    # never reach any caller: a permanent leak, the exact failure this design exists to
-    # prevent. So any exception raised while resolving a speaker is caught here, has
-    # the ids already cloned so far attached to it (`exc.cloned_voice_ids`), and is then
-    # re-raised: `cli.py` reads that attribute to clean up before propagating the error,
-    # instead of only reading `VoiceResolution.cloned_voice_ids`, which a raise never
-    # produces.
-    try:
-        for speaker in speakers:
-            if want_clone and can_clone:
-                sample_path, seconds_gathered = extract_speaker_sample(
-                    source, speaker, segments, target_seconds=clone_target_seconds
-                )
-                if seconds_gathered >= clone_min_seconds:
-                    from movie_subtitles.providers.elevenlabs import clone_voice
-
-                    name = f"{voice_name_prefix} {Path(source).stem} {speaker}"
-                    try:
-                        voice_id = clone_voice(client, name, [sample_path])
-                    except Exception as exc:  # noqa: BLE001 -- degrade to preset, never abort
-                        logger.warning(
-                            f"Cloning voice for speaker {speaker!r} failed ({exc}); falling "
-                            "back to a preset voice"
-                        )
-                        profile = classify_voice(sample_path)
-                        voices[speaker] = _preset_voice(presets, tts_engine, profile)
-                        continue
-
-                    voices[speaker] = voice_id
-                    cloned_ids.append(voice_id)
-                    continue
-
-                logger.warning(
-                    f"Speaker {speaker!r} has only {seconds_gathered:.1f}s of clean audio "
-                    f"(need {clone_min_seconds:.1f}s to clone); falling back to a preset voice"
-                )
-                profile = classify_voice(sample_path)
-            else:
-                sample_path, _seconds_gathered = extract_speaker_sample(
-                    source, speaker, segments, target_seconds=clone_target_seconds
-                )
-                profile = classify_voice(sample_path)
-
-            voices[speaker] = _preset_voice(presets, tts_engine, profile)
-    except Exception as exc:
-        # Hand the caller whatever was cloned before the failure so it can release the
-        # slots; a raise never returns the VoiceResolution that would otherwise carry
-        # them. suppress(): an exception type defining __slots__ rejects the attribute,
-        # and failing to annotate the error must never replace the error itself.
-        with suppress(Exception):
-            exc.cloned_voice_ids = cloned_ids  # type: ignore[attr-defined]
-        raise
-
-    return VoiceResolution(voices=voices, cloned_voice_ids=cloned_ids)
-
-
-def cleanup_cloned_voices(cloned_voice_ids: list[str]) -> None:
+def _cleanup_cloned_voices(cloned_voice_ids: list[str]) -> None:
     """Delete previously cloned voices, individually guarded.
 
     A failing delete logs a WARNING naming the leaked voice id and never aborts the
-    remaining deletions, nor masks an exception already propagating from the caller's
-    `finally` block.
+    remaining deletions, nor masks an exception already propagating from the caller.
     """
     if not cloned_voice_ids:
         return
@@ -512,3 +360,105 @@ def cleanup_cloned_voices(cloned_voice_ids: list[str]) -> None:
             delete_voice(client, voice_id)
         except Exception as exc:  # noqa: BLE001 -- must not abort remaining deletions
             logger.warning(f"Failed to delete cloned voice {voice_id}: {exc}; delete it manually")
+
+
+@contextmanager
+def resolved_voices(
+    source: str | Path,
+    segments: list[Segment],
+    *,
+    tts_engine: str,
+    mode: str = "auto",
+    clone_min_seconds: float = CLONE_MIN_SECONDS,
+    clone_target_seconds: float = CLONE_TARGET_SECONDS,
+    presets: dict[str, dict[str, str]] | None = None,
+    keep: bool = False,
+) -> Iterator[dict[str | None, str | None]]:
+    """Resolve a speaker -> TTS voice id mapping for `--dub`, honouring `--voice-match`.
+
+    Yields the mapping for the caller to use for the duration of the `with` block. Any
+    voice cloned along the way (ElevenLabs IVC) is deleted on exit unless `keep` is set
+    -- whether the block completes normally, the resolution loop itself raises partway
+    through, or the caller's `with` body (e.g. the dub) raises. A cloned voice succeeds
+    by mutating the ElevenLabs account immediately (there is no way to "undo" that
+    except an explicit delete), so a permanently leaked paid voice slot is the failure
+    this context manager exists to prevent -- success and failure share this one
+    cleanup path instead of being handled separately by the caller.
+
+    - `mode="off"`: yields an all-empty mapping. Does no diarization work, sample
+      extraction, or lazy import -- byte-for-byte today's (pre-diarization) behaviour.
+    - `mode="clone"`: clones every eligible speaker (ElevenLabs IVC only). A speaker
+      with fewer than `clone_min_seconds` of clean audio falls back to a preset, with
+      a WARNING naming the speaker and the seconds actually found.
+    - `mode="preset"`: classifies each speaker and picks a preset voice; never clones.
+    - `mode="auto"`: clones when `tts_engine` supports cloning (elevenlabs), otherwise
+      (and for any speaker ineligible to clone) falls back to preset matching.
+
+    Cloning is never attempted for `tts_engine="openai"` in any mode. `presets`
+    defaults to the built-in `_DEFAULT_PRESETS` table when not given.
+    """
+    if mode not in VOICE_MATCH_MODES:
+        raise ValueError(f"Unknown voice-match mode {mode!r} (expected one of {VOICE_MATCH_MODES})")
+
+    voices: dict[str | None, str | None] = {}
+    cloned_ids: list[str] = []
+    try:
+        if mode != "off":
+            speakers = sorted({s.speaker for s in segments if s.speaker is not None})
+            if not speakers:
+                logger.info("No segment carries a speaker label; dubbing with a single voice")
+            else:
+                presets = presets if presets is not None else _DEFAULT_PRESETS
+                can_clone = tts_engine in _CLONE_CAPABLE_ENGINES
+                want_clone = mode == "clone" or (mode == "auto" and can_clone)
+
+                client = None
+                if want_clone and can_clone:
+                    from movie_subtitles.providers.elevenlabs import build_client
+
+                    client = build_client()
+
+                clean_by_speaker = _clean_segments_by_speaker(segments)
+
+                for speaker in speakers:
+                    sample_path, seconds_gathered = extract_speaker_sample(
+                        source,
+                        speaker,
+                        clean_by_speaker.get(speaker, []),
+                        target_seconds=clone_target_seconds,
+                    )
+
+                    if want_clone and can_clone and seconds_gathered >= clone_min_seconds:
+                        from movie_subtitles.providers.elevenlabs import clone_voice
+
+                        name = f"movie-subtitles {Path(source).stem} {speaker}"
+                        try:
+                            voice_id = clone_voice(client, name, [sample_path])
+                        except Exception as exc:  # noqa: BLE001 -- degrade to preset
+                            logger.warning(
+                                f"Cloning voice for speaker {speaker!r} failed ({exc}); "
+                                "falling back to a preset voice"
+                            )
+                        else:
+                            voices[speaker] = voice_id
+                            cloned_ids.append(voice_id)
+                            continue
+                    elif want_clone and can_clone:
+                        logger.warning(
+                            f"Speaker {speaker!r} has only {seconds_gathered:.1f}s of clean "
+                            f"audio (need {clone_min_seconds:.1f}s to clone); falling back "
+                            "to a preset voice"
+                        )
+
+                    profile = classify_voice(sample_path) if sample_path is not None else None
+                    voices[speaker] = _preset_voice(presets, tts_engine, profile)
+
+        yield voices
+    finally:
+        if cloned_ids:
+            if keep:
+                logger.info(
+                    f"Keeping cloned voices (--keep-cloned-voices): {', '.join(cloned_ids)}"
+                )
+            else:
+                _cleanup_cloned_voices(cloned_ids)
