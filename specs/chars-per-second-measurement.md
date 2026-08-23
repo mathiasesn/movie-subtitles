@@ -206,9 +206,9 @@ MOVIE_SUBTITLES_LOG_LEVEL=DEBUG uv run movie-subtitles \
 - `data/measurements/step2-max-budget.measure.log` -- 50 `[measure]` lines from
   the step 2 paid verification run under the new `max()` derivation, the source
   of the Verification table above.
-- `data/measurements/measure.py` -- the script used to parse the three logs above
-  and compute the medians over the first three logs (source chars/slot-second, tts-1 Danish chars/sec,
-  unconstrained en->da expansion ratio) cited in this document.
+- `data/measurements/measure.py` -- the script used to parse the first three logs
+  above and compute the medians cited in this document (source chars/slot-second,
+  tts-1 Danish chars/sec, unconstrained en->da expansion ratio).
 
 These are the filtered `[measure]` DEBUG lines emitted by `cli.py`/`dub.py`
 (vendor SDK HTTP chatter stripped), not the complete run logs.
