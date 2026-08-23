@@ -2,6 +2,7 @@ import logging
 import os
 import shutil
 import subprocess
+import tempfile
 from argparse import ArgumentParser, ArgumentTypeError
 from pathlib import Path
 
@@ -383,31 +384,33 @@ def _dub_and_mux(
         voices=voices,
     )
 
+    # The accompaniment stem is a multi-hundred-MB intermediate that only mux_dub reads,
+    # so it goes in a temp dir rather than next to the user's video -- matching the
+    # discipline separate.py itself keeps -- and the whole dir is removed below.
+    stem_dir = tempfile.mkdtemp(prefix="movie-subtitles-dub-") if separate_background else None
+
     background_path: Path | None = None
-    accompaniment_path: Path | None = None
     if separate_background:
-        accompaniment_path = fpath.with_name(f"{fpath.stem}.accompaniment.wav")
-        # Imported outside the guarded try below: demucs/torchaudio are declared hard
-        # dependencies (see separate.py's module docstring), so an ImportError here
-        # means the install is broken, not that separation merely failed at runtime.
-        # That must propagate and fail the run, not be swallowed into a WARNING and a
-        # silent fallback -- only a genuine runtime failure (unreachable weights, a bad
-        # input file, an apply_model/ffmpeg error) degrades gracefully.
+        # Imported outside the guarded try below: demucs is a declared hard dependency
+        # (see separate.py's module docstring), so an ImportError here means the install
+        # is broken, not that separation merely failed at runtime. That must propagate
+        # and fail the run, not be swallowed into a WARNING and a silent fallback --
+        # only a genuine runtime failure (unreachable weights, a bad input file, a
+        # decode/inference error) degrades gracefully.
         from movie_subtitles.separate import Separate
 
         try:
             separator = Separate()
-            background_path = separator(fpath, accompaniment_path)
+            background_path = separator(fpath, Path(stem_dir) / f"{fpath.stem}.accompaniment.wav")
         except Exception as exc:
             # Separation is a nice-to-have on top of the #22 duck-and-mix path, not a
-            # hard requirement of --dub: missing/unreachable model weights, a bad
-            # input file, or any apply_model/ffmpeg error must never fail the whole
-            # run. Falling back to ducking the original audio instead.
+            # hard requirement of --dub: unreachable model weights, a bad input file, or
+            # any decode/inference error must never fail the whole run. Falling back to
+            # ducking the original audio instead.
             logger.warning(
                 f"Source separation failed ({exc}); falling back to ducking the "
                 "original audio instead of muxing over an accompaniment stem."
             )
-            background_path = None
 
     try:
         dubbed_path = mux_dub(
@@ -420,8 +423,8 @@ def _dub_and_mux(
         logger.info(f"Saved dubbed video to {dubbed_path}")
     finally:
         audio_track.unlink()
-        if accompaniment_path is not None and accompaniment_path.exists():
-            accompaniment_path.unlink()
+        if stem_dir is not None:
+            shutil.rmtree(stem_dir, ignore_errors=True)
 
 
 def _load_env() -> None:

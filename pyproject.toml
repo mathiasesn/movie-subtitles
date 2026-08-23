@@ -31,12 +31,10 @@ dependencies = [
     # (see the accelerate entry above).
     "numpy",
     # separate.py's --separate-background path: Demucs source separation
-    # (vocals/accompaniment stems) for mux.py to mix the dub over.
+    # (vocals/accompaniment stems) for mux.py to mix the dub over. separate.py goes
+    # through demucs.api.Separator, which owns the decode and the write too, so no
+    # separate audio-I/O library is needed alongside it.
     "demucs",
-    # separate.py imports torchaudio directly (wav load/save around the Demucs call);
-    # it resolves transitively via demucs, but per this repo's convention (see the
-    # numpy entry above) a directly-imported package must be declared explicitly.
-    "torchaudio",
 ]
 
 [project.urls]

@@ -155,32 +155,29 @@ def mux_dub(
     source_format = probe_audio_format(video_path)
 
     if source_format is None:
-        if background_path is not None:
-            logger.info(
-                f"{video_path} has no audio stream; ignoring background_path and "
-                "muxing the dub track alone."
-            )
-        else:
-            logger.info(f"{video_path} has no audio stream; muxing the dub track alone.")
+        ignored = "ignoring background_path and " if background_path is not None else ""
+        logger.info(f"{video_path} has no audio stream; {ignored}muxing the dub track alone.")
         filter_args: list[str] = []
         audio_map = "1:a:0"
     else:
-        if duck_level is not None:
-            resolved_duck_level = duck_level
-        elif background_path is not None:
-            resolved_duck_level = _SEPARATED_DUCK_LEVEL
+        # One branch decides everything that follows from "is the bed a separate file?":
+        # which input carries it, and which of the two duck defaults the `duck_level=None`
+        # sentinel resolves to. Splitting these across separate `background_path is not
+        # None` tests would let them drift apart.
+        if background_path is not None:
+            base_cmd = base_cmd + ["-i", str(background_path)]
+            original_label = "2:a:0"
+            default_duck_level = _SEPARATED_DUCK_LEVEL
+        else:
+            original_label = "0:a:0"
+            default_duck_level = _DUCK_LEVEL
+
+        resolved_duck_level = default_duck_level if duck_level is None else duck_level
+        if duck_level is None and background_path is not None:
             logger.info(
                 f"Ducking the separated background bed at the gentler {_SEPARATED_DUCK_LEVEL} "
                 "since the original dialogue was already removed by separation."
             )
-        else:
-            resolved_duck_level = _DUCK_LEVEL
-
-        if background_path is not None:
-            base_cmd = base_cmd + ["-i", str(background_path)]
-            original_label = "2:a:0"
-        else:
-            original_label = "0:a:0"
 
         # `duck_level` 1.0 means "don't duck", which the volume chain would express as a
         # per-frame multiply by 1.0 -- tens of millions of expression-node visits over a

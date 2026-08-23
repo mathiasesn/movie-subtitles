@@ -5,26 +5,29 @@ Feeds #24 (`--separate-background`, `specs/separate-background-stem-for-dub.md`)
 dialogue, rather than merely ducking that dialogue underneath it. Producing that bed
 needs real source separation, not just an ffmpeg filter, hence Demucs.
 
-Both `demucs.pretrained` and `demucs.apply` are imported lazily, inside `Separate.__init__`
-and `Separate.separate` respectively, per this repo's convention (see
-`voices.py:classify_voice`'s lazy `librosa`/`parselmouth` imports): a run without
-`--separate-background` -- the overwhelming majority of runs -- must not pay Demucs's
-(and by extension torch's) import cost.
+Every demucs import is lazy -- `demucs.api` inside `Separate.__init__`, `demucs.audio`
+inside `Separate.separate` -- per this repo's convention (see `voices.py:classify_voice`'s
+lazy `librosa`/`parselmouth` imports): a run without `--separate-background`, the
+overwhelming majority of runs, must not pay Demucs's (and by extension torch's) import
+cost.
+
+The work goes through `demucs.api.Separator` rather than a hand-rolled
+`get_model`/`apply_model`/load/save pipeline. That is not just less code: `Separator`
+already owns the decode (via ffmpeg, resampling to the model's own rate/channels itself),
+the batching, `no_grad`, and the per-chunk device transfers, so this module neither
+extracts an intermediate wav of its own -- a full-length, ~1.3 GB-for-a-feature disk
+round-trip when it did -- nor needs a second audio-I/O library to read one back.
 
 Demucs is a hard runtime dependency (see `pyproject.toml`), so the failure this module
-must let propagate is a *runtime* one -- unreachable model weights, a bad input file, an
-`apply_model`/ffmpeg error -- not a missing package. The caller (`cli.py`, not this
-module) is responsible for catching that and degrading to the #22 duck-and-mix path;
-this module never swallows an exception itself.
+must let propagate is a *runtime* one -- unreachable model weights, a bad input file, a
+decode/inference error -- not a missing package. The caller (`cli.py`, not this module)
+is responsible for catching that and degrading to the #22 duck-and-mix path; this module
+never swallows an exception itself.
 """
 
 import logging
-import shutil
-import tempfile
 import time
 from pathlib import Path
-
-from movie_subtitles import ffmpeg
 
 logger = logging.getLogger("separate")
 
@@ -34,6 +37,11 @@ logger = logging.getLogger("separate")
 _MODEL_NAME = "htdemucs"
 
 _VOCALS_STEM = "vocals"
+
+# 16-bit is what the accompaniment is for: `mux_dub` reads it straight back through
+# ffmpeg and re-encodes it into the output container anyway, so `save_audio`'s float
+# default would double this file's size (~2.5 GB for a feature) to no audible end.
+_OUTPUT_BITS_PER_SAMPLE = 16
 
 
 class Separate:
@@ -46,84 +54,72 @@ class Separate:
     def __init__(self) -> None:
         # Lazy import: demucs (and therefore torch, if not already loaded) must never
         # be imported by a run that doesn't pass --separate-background.
-        from demucs.pretrained import get_model
+        import torch
+        from demucs.api import Separator
 
-        self._model = get_model(_MODEL_NAME)
-        self._model.eval()
+        # Demucs defaults to the device its input tensor is on, i.e. the CPU, where
+        # htdemucs is roughly an order of magnitude slower than on CUDA. torch is
+        # already a dependency of this project and `providers/local.py` takes the same
+        # posture with `device_map="auto"`, so prefer a GPU when the machine has one.
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info(f"Loading the {_MODEL_NAME} separation model on {device}.")
+        self._separator = Separator(model=_MODEL_NAME, device=device)
 
     def __call__(self, fpath: Path, out_path: Path) -> Path:
         return self.separate(fpath, out_path)
 
     def separate(self, fpath: Path, out_path: Path) -> Path:
-        """Extract `fpath`'s audio, separate it, and write the accompaniment to `out_path`.
+        """Separate `fpath`'s audio and write the accompaniment stem to `out_path`.
 
         The accompaniment is every Demucs stem except `vocals`, summed -- equivalently
-        Demucs's `--two-stems=vocals` complement -- indexed via `self._model.sources`
-        rather than a hardcoded stem order, since that order is a model property, not a
-        constant this module should assume.
+        Demucs's `--two-stems=vocals` complement -- keyed by stem name off what the model
+        actually returns rather than a hardcoded stem order, since that set is a model
+        property, not a constant this module should assume.
 
-        Runs at the model's own expected sample rate/channel count
-        (`self._model.samplerate`/`self._model.audio_channels`), so no resampling
-        happens between ffmpeg's extraction and Demucs's forward pass. Demucs works
-        internally at 44.1 kHz stereo, so a 5.1/48 kHz source is downmixed/resampled
-        here and does not keep its original layout in the returned accompaniment file
-        -- `mux_dub` re-targets the final output to the source's own format separately.
+        The stems are summed in place, into a single clone of the first non-vocals stem.
+        That matters at this size: the returned stems are float32 and full-length (~2.5 GB
+        each for a 2-hour film at the model's 44.1 kHz stereo), so summing them with the
+        obvious `sum(...)` would allocate a fresh full-length tensor per addition. The
+        stem dict is dropped before the write, so the vocals stem -- the one thing here
+        that exists only to be discarded -- isn't held resident across it.
 
-        This is CPU-minutes-to-tens-of-minutes on a feature-length film; callers should
-        expect and communicate that, not treat a long-running call as hung.
+        Demucs works internally at 44.1 kHz stereo, so a 5.1/48 kHz source is
+        downmixed/resampled by `Separator` and does not keep its original layout in the
+        accompaniment file -- `mux_dub` re-targets the final muxed output to the source's
+        own format separately.
 
-        Raises whatever `ffmpeg.run`, `torch`/`demucs`, or the write step raises --
-        nothing here is caught. Cleans up its own temp files in a `finally`, including
-        on failure.
+        This is CPU-minutes-to-tens-of-minutes on a feature-length film (less on a GPU;
+        see `__init__`); callers should expect and communicate that, not treat a
+        long-running call as hung.
+
+        Raises whatever `Separator` or the write step raises -- nothing here is caught.
         """
-        import torch
-        from demucs.apply import apply_model
+        from demucs.audio import save_audio
 
-        tmp_dir = Path(tempfile.mkdtemp(prefix="movie-subtitles-separate-"))
-        extracted_wav = tmp_dir / "extracted.wav"
-        try:
-            ffmpeg.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-i",
-                    str(fpath),
-                    "-vn",
-                    "-ac",
-                    str(self._model.audio_channels),
-                    "-ar",
-                    str(self._model.samplerate),
-                    "-c:a",
-                    "pcm_s16le",
-                    str(extracted_wav),
-                ],
-                what=f"Extracting audio from {fpath.name} for source separation",
+        logger.info(
+            f"Separating {fpath.name} into vocals/accompaniment stems via {_MODEL_NAME} "
+            "-- this can take minutes to tens of minutes on CPU for a feature-length film."
+        )
+        start = time.monotonic()
+        _, stems = self._separator.separate_audio_file(fpath)
+        logger.info(f"Source separation finished in {time.monotonic() - start:.1f}s.")
+
+        accompaniment = None
+        for name, stem in stems.items():
+            if name == _VOCALS_STEM:
+                continue
+            accompaniment = stem.clone() if accompaniment is None else accompaniment.add_(stem)
+        if accompaniment is None:
+            raise RuntimeError(
+                f"{_MODEL_NAME} returned no stem other than '{_VOCALS_STEM}' "
+                f"(got {sorted(stems)}), so there is no accompaniment to mix the dub over."
             )
+        stems.clear()
 
-            import torchaudio
-
-            waveform, _ = torchaudio.load(str(extracted_wav))
-            # apply_model expects a batch dimension: (batch, channels, samples).
-            mixture = waveform.unsqueeze(0)
-
-            logger.info(
-                f"Separating source audio into vocals/accompaniment stems via {_MODEL_NAME} -- "
-                "this can take minutes to tens of minutes on CPU for a feature-length film."
-            )
-            start = time.monotonic()
-            with torch.no_grad():
-                stems = apply_model(self._model, mixture)[0]
-            elapsed = time.monotonic() - start
-            logger.info(f"Source separation finished in {elapsed:.1f}s.")
-
-            accompaniment = sum(
-                stems[i] for i, source in enumerate(self._model.sources) if source != _VOCALS_STEM
-            )
-
-            torchaudio.save(str(out_path), accompaniment, self._model.samplerate)
-        finally:
-            # Cleanup must happen even on failure, so this lives in `finally` rather
-            # than after the `try` block.
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-
+        save_audio(
+            accompaniment,
+            out_path,
+            self._separator.samplerate,
+            bits_per_sample=_OUTPUT_BITS_PER_SAMPLE,
+        )
         return out_path
