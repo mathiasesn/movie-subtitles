@@ -8,6 +8,11 @@ from pathlib import Path
 _AUDIO_CODEC_BY_SUFFIX = {".webm": "libopus"}
 _DEFAULT_AUDIO_CODEC = "aac"
 
+_UNKNOWN_CHANNEL_LAYOUT_FALLBACK = "stereo"
+
+# ffprobe can also report an empty/non-numeric sample_rate; 48 kHz is the safe default.
+_UNKNOWN_SAMPLE_RATE_FALLBACK = 48000
+
 
 def audio_codec_for(suffix: str) -> str:
     """The audio codec to encode to when writing into a `suffix` container."""
@@ -71,12 +76,6 @@ def probe_duration(fpath: Path) -> float:
     return float(stdout.strip())
 
 
-_UNKNOWN_CHANNEL_LAYOUT_FALLBACK = "stereo"
-
-# ffprobe can also report an empty/non-numeric sample_rate; 48 kHz is the safe default.
-_UNKNOWN_SAMPLE_RATE_FALLBACK = 48000
-
-
 def probe_audio_format(fpath: Path) -> tuple[str, int] | None:
     """The first audio stream's `(channel_layout, sample_rate)`, per ffprobe, or `None`.
 
@@ -99,6 +98,12 @@ def probe_audio_format(fpath: Path) -> tuple[str, int] | None:
     )
     lines = stdout.strip().splitlines()
     if not lines:
+        # Not reachable via "a stream with unreadable fields": keyed output
+        # (`noprint_wrappers=1` without `nokey=1`) makes ffprobe print unavailable
+        # fields as `key=unknown`/`key=N/A` rather than omitting the line -- e.g. a
+        # container with no derivable channel_layout still yields a `sample_rate=...`
+        # line, handled by the `unknown` fallback below. Empty output therefore means
+        # there genuinely is no `a:0` stream at all.
         return None
     # Keyed output (no `nokey=1`): ffprobe emits `default` fields in its own internal
     # order, not the order -show_entries asked for, so parsing by position would silently

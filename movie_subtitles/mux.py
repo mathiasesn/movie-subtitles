@@ -19,11 +19,8 @@ _DUCK_LEVEL = 0.25
 _MIX_INPUT_GAIN = 0.7
 
 
-# `volume`'s expression is one ffmpeg argv token; a single filter built from hundreds of
-# `between(...)` terms risks exceeding practical expression/argv limits. Spans are
-# chunked into filters of at most this many terms each and chained -- each chunk's
-# spans are disjoint from every other chunk's (spans are globally coalesced first), so
-# multiplying by 1.0 outside a chunk's own spans never double-ducks.
+# Caps how many `between(...)` terms a single chained `volume` filter can hold; see
+# `_ducking_chain`'s docstring for why.
 _MAX_SPANS_PER_FILTER = 200
 
 
