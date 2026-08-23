@@ -18,11 +18,13 @@ the batching, `no_grad`, and the per-chunk device transfers, so this module neit
 extracts an intermediate wav of its own -- a full-length, ~1.3 GB-for-a-feature disk
 round-trip when it did -- nor needs a second audio-I/O library to read one back.
 
-Demucs is a hard runtime dependency (see `pyproject.toml`), so the failure this module
-must let propagate is a *runtime* one -- unreachable model weights, a bad input file, a
-decode/inference error -- not a missing package. The caller (`cli.py`, not this module)
-is responsible for catching that and degrading to the #22 duck-and-mix path; this module
-never swallows an exception itself.
+Demucs is a hard runtime dependency (see `pyproject.toml`); this module never swallows
+an exception itself, so both kinds of failure propagate out of it. The two kinds are
+handled differently by the caller: `cli.py` catches a *runtime* one -- unreachable model
+weights, a bad input file, a decode/inference error -- and degrades to the #22
+duck-and-mix path, but an `ImportError`/`ModuleNotFoundError` -- including from this
+module's own lazy `demucs.api`/`torch` imports -- is re-raised and fails the run instead,
+since a broken install must not silently produce a worse output audio bed.
 """
 
 import logging
