@@ -40,7 +40,7 @@ def _positive_float(value: str) -> float:
     return n
 
 
-def _duck_level(value: str) -> float:
+def _unit_float(value: str) -> float:
     n = float(value)
     if not 0.0 <= n <= 1.0:
         raise ArgumentTypeError(f"must be between 0.0 and 1.0 inclusive, got {n}")
@@ -549,7 +549,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--duck-level",
-        type=_duck_level,
+        type=_unit_float,
         default=0.25,
         help=(
             "How much to attenuate the original audio while the dub is speaking, during "

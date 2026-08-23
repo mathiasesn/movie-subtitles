@@ -7,9 +7,10 @@ from movie_subtitles.ffmpeg import run as run_ffmpeg
 
 logger = logging.getLogger("mux")
 
-# How much the original audio is attenuated while the dub is speaking. 0.25 keeps the
-# original's music/effects/ambience audible underneath without competing with the
-# translated dialogue.
+# Default for `mux_dub(duck_level=...)`, overridable per run via `--duck-level` -- unlike
+# `_MIX_INPUT_GAIN` below, this one is a tunable. 0.25 keeps the original's
+# music/effects/ambience audible underneath without competing with the translated
+# dialogue.
 _DUCK_LEVEL = 0.25
 
 # Per-input gain applied to both streams before `amix=normalize=0`, which -- unlike the
@@ -80,8 +81,8 @@ def mux_dub(
     Writes `<video>.dubbed<ext>` next to `video_path` and returns that path. When the
     source has an audio track, the output keeps it underneath the dub rather than
     dropping it: the original is mixed with the synthesised track (`amix=normalize=0`),
-    ducked to `duck_level` (default `_DUCK_LEVEL`) while `speech_spans` says the dub is
-    speaking so the translated dialogue stays dominant. `speech_spans` is a list of `(start, end)`
+    ducked to `duck_level` while `speech_spans` says the dub is speaking so the
+    translated dialogue stays dominant. `speech_spans` is a list of `(start, end)`
     windows in seconds (typically `dub.synthesise_track()`'s second return value);
     omitting it (or passing an empty list) mixes the original in unducked throughout.
     A source with no audio stream at all (per `ffmpeg.probe_audio_format` returning
@@ -121,7 +122,11 @@ def mux_dub(
         filter_args: list[str] = []
         audio_map = "1:a:0"
     else:
-        spans = speech_spans or []
+        # `duck_level` 1.0 means "don't duck", which the volume chain would express as a
+        # per-frame multiply by 1.0 -- tens of millions of expression-node visits over a
+        # feature-length source to compute the identity. Treat it like having no spans at
+        # all and reuse the existing unducked path instead of building the chain.
+        spans = [] if duck_level >= 1.0 else (speech_spans or [])
         duck_statements, ducked_label = _ducking_chain(spans, "0:a:0", duck_level)
 
         # Target the *source's* own channel layout/sample rate rather than a fixed
