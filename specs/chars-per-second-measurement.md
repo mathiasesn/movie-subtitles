@@ -136,3 +136,18 @@ MOVIE_SUBTITLES_LOG_LEVEL=DEBUG uv run movie-subtitles \
   --asr-engine elevenlabs --translation-engine anthropic --tts-engine openai \
   --dub --voice-match off
 ```
+
+## Raw records
+
+- `data/measurements/clip-translate-synth.measure.log` -- 51 `[measure]` lines from
+  the 45s clip run (translate + synth measurements).
+- `data/measurements/trailer-translate-synth.measure.log` -- 153 `[measure]` lines
+  from the ~3-minute trailer run (translate + synth measurements).
+- `data/measurements/verify-clip.measure.log` -- 57 `[measure]` lines from the
+  verification run over the clip, re-checking the derived constants above.
+- `data/measurements/measure.py` -- the script used to parse the three logs above
+  and compute the medians (source chars/slot-second, tts-1 Danish chars/sec,
+  unconstrained en->da expansion ratio) cited in this document.
+
+These are the filtered `[measure]` DEBUG lines emitted by `cli.py`/`dub.py`
+(vendor SDK HTTP chatter stripped), not the complete run logs.

@@ -1,0 +1,57 @@
+[23/08/2026-18:10:11][DEBUG][cli] [measure] measure=translate id=0 start=2.019 end=3.619 slot=1.600 src_chars=20 tgt_chars=17 budget=20 lang=da
+[23/08/2026-18:10:16][DEBUG][cli] [measure] measure=translate id=1 start=3.980 end=5.539 slot=1.559 src_chars=27 tgt_chars=21 budget=27 lang=da
+[23/08/2026-18:10:18][DEBUG][cli] [measure] measure=translate id=2 start=5.859 end=8.179 slot=2.320 src_chars=54 tgt_chars=39 budget=45 lang=da
+[23/08/2026-18:10:20][DEBUG][cli] [measure] measure=translate id=3 start=8.399 end=9.719 slot=1.320 src_chars=21 tgt_chars=16 budget=21 lang=da
+[23/08/2026-18:10:22][DEBUG][cli] [measure] measure=translate id=4 start=10.159 end=10.920 slot=0.761 src_chars=3 tgt_chars=3 budget=3 lang=da
+[23/08/2026-18:10:30][DEBUG][cli] [measure] measure=translate id=5 start=10.979 end=13.559 slot=2.580 src_chars=31 tgt_chars=28 budget=32 lang=da
+[23/08/2026-18:10:32][DEBUG][cli] [measure] measure=translate id=6 start=14.239 end=15.239 slot=1.000 src_chars=17 tgt_chars=17 budget=17 lang=da
+[23/08/2026-18:10:33][DEBUG][cli] [measure] measure=translate id=7 start=15.479 end=17.579 slot=2.100 src_chars=35 tgt_chars=20 budget=36 lang=da
+[23/08/2026-18:10:35][DEBUG][cli] [measure] measure=translate id=8 start=18.840 end=20.639 slot=1.799 src_chars=32 tgt_chars=25 budget=33 lang=da
+[23/08/2026-18:10:36][DEBUG][cli] [measure] measure=translate id=9 start=21.340 end=23.139 slot=1.799 src_chars=17 tgt_chars=16 budget=17 lang=da
+[23/08/2026-18:10:39][DEBUG][cli] [measure] measure=translate id=10 start=26.659 end=28.439 slot=1.780 src_chars=27 tgt_chars=24 budget=27 lang=da
+[23/08/2026-18:10:41][DEBUG][cli] [measure] measure=translate id=11 start=28.500 end=29.760 slot=1.260 src_chars=26 tgt_chars=18 budget=24 lang=da
+[23/08/2026-18:10:44][DEBUG][cli] [measure] measure=translate id=12 start=29.799 end=30.939 slot=1.140 src_chars=22 tgt_chars=18 budget=22 lang=da
+[23/08/2026-18:10:57][DEBUG][cli] [measure] measure=translate id=13 start=31.000 end=32.719 slot=1.719 src_chars=27 tgt_chars=29 budget=27 lang=da
+[23/08/2026-18:10:58][DEBUG][cli] [measure] measure=translate id=14 start=32.799 end=34.959 slot=2.160 src_chars=28 tgt_chars=19 budget=29 lang=da
+[23/08/2026-18:11:00][DEBUG][cli] [measure] measure=translate id=15 start=35.000 end=35.520 slot=0.520 src_chars=22 tgt_chars=11 budget=10 lang=da
+[23/08/2026-18:11:01][DEBUG][cli] [measure] measure=translate id=16 start=35.579 end=36.540 slot=0.961 src_chars=14 tgt_chars=12 budget=14 lang=da
+[23/08/2026-18:11:02][DEBUG][cli] [measure] measure=translate id=17 start=40.000 end=40.759 slot=0.759 src_chars=14 tgt_chars=13 budget=14 lang=da
+[23/08/2026-18:11:04][DEBUG][cli] [measure] measure=translate id=18 start=40.879 end=41.839 slot=0.960 src_chars=16 tgt_chars=16 budget=16 lang=da
+[23/08/2026-18:11:05][DEBUG][cli] [measure] measure=translate id=19 start=42.399 end=44.579 slot=2.180 src_chars=43 tgt_chars=41 budget=43 lang=da
+[23/08/2026-18:11:07][DEBUG][dub] [measure] measure=synth id=0 pass=0 rate=1.000 tgt_chars=17 speech_len=0.925 src_speech=1.600
+[23/08/2026-18:11:08][DEBUG][dub] [measure] measure=synth id=1 pass=0 rate=1.000 tgt_chars=21 speech_len=0.795 src_speech=1.559
+[23/08/2026-18:11:09][DEBUG][dub] [measure] measure=synth id=2 pass=0 rate=1.000 tgt_chars=39 speech_len=1.805 src_speech=2.320
+[23/08/2026-18:11:11][DEBUG][dub] [measure] measure=synth id=3 pass=0 rate=1.000 tgt_chars=16 speech_len=0.728 src_speech=1.320
+[23/08/2026-18:11:12][DEBUG][dub] [measure] measure=synth id=4 pass=0 rate=1.000 tgt_chars=3 speech_len=0.480 src_speech=0.761
+[23/08/2026-18:11:15][DEBUG][dub] [measure] measure=synth id=5 pass=0 rate=1.000 tgt_chars=28 speech_len=1.577 src_speech=2.580
+[23/08/2026-18:11:16][DEBUG][dub] [measure] measure=synth id=6 pass=0 rate=1.000 tgt_chars=17 speech_len=0.825 src_speech=1.000
+[23/08/2026-18:11:18][DEBUG][dub] [measure] measure=synth id=7 pass=0 rate=1.000 tgt_chars=20 speech_len=1.104 src_speech=2.100
+[23/08/2026-18:11:19][DEBUG][dub] [measure] measure=synth id=8 pass=0 rate=1.000 tgt_chars=25 speech_len=1.092 src_speech=1.799
+[23/08/2026-18:11:20][DEBUG][dub] [measure] measure=synth id=9 pass=0 rate=1.000 tgt_chars=16 speech_len=0.808 src_speech=1.799
+[23/08/2026-18:11:22][DEBUG][dub] [measure] measure=synth id=10 pass=0 rate=1.000 tgt_chars=24 speech_len=1.323 src_speech=1.780
+[23/08/2026-18:11:23][DEBUG][dub] [measure] measure=synth id=11 pass=0 rate=1.000 tgt_chars=18 speech_len=0.889 src_speech=1.260
+[23/08/2026-18:11:24][DEBUG][dub] [measure] measure=synth id=12 pass=0 rate=1.000 tgt_chars=18 speech_len=0.937 src_speech=1.140
+[23/08/2026-18:11:25][DEBUG][dub] [measure] measure=synth id=13 pass=0 rate=1.000 tgt_chars=29 speech_len=1.360 src_speech=1.719
+[23/08/2026-18:11:26][DEBUG][dub] [measure] measure=synth id=14 pass=0 rate=1.000 tgt_chars=19 speech_len=0.938 src_speech=2.160
+[23/08/2026-18:11:28][DEBUG][dub] [measure] measure=synth id=15 pass=0 rate=1.000 tgt_chars=11 speech_len=0.496 src_speech=0.520
+[23/08/2026-18:11:30][DEBUG][dub] [measure] measure=synth id=16 pass=0 rate=1.000 tgt_chars=12 speech_len=0.552 src_speech=0.961
+[23/08/2026-18:11:31][DEBUG][dub] [measure] measure=synth id=17 pass=0 rate=1.000 tgt_chars=13 speech_len=0.476 src_speech=0.759
+[23/08/2026-18:11:33][DEBUG][dub] [measure] measure=synth id=18 pass=0 rate=1.000 tgt_chars=16 speech_len=0.703 src_speech=0.960
+[23/08/2026-18:11:34][DEBUG][dub] [measure] measure=synth id=19 pass=0 rate=1.000 tgt_chars=41 speech_len=2.318 src_speech=2.180
+[23/08/2026-18:11:35][DEBUG][dub] [measure] measure=synth id=0 pass=1 rate=0.900 tgt_chars=17 speech_len=0.911 src_speech=1.600
+[23/08/2026-18:11:37][DEBUG][dub] [measure] measure=synth id=1 pass=1 rate=0.900 tgt_chars=21 speech_len=0.891 src_speech=1.559
+[23/08/2026-18:11:38][DEBUG][dub] [measure] measure=synth id=2 pass=1 rate=0.900 tgt_chars=39 speech_len=1.887 src_speech=2.320
+[23/08/2026-18:11:40][DEBUG][dub] [measure] measure=synth id=3 pass=1 rate=0.900 tgt_chars=16 speech_len=0.790 src_speech=1.320
+[23/08/2026-18:11:41][DEBUG][dub] [measure] measure=synth id=4 pass=1 rate=0.900 tgt_chars=3 speech_len=0.381 src_speech=0.761
+[23/08/2026-18:11:42][DEBUG][dub] [measure] measure=synth id=5 pass=1 rate=0.900 tgt_chars=28 speech_len=1.789 src_speech=2.580
+[23/08/2026-18:11:44][DEBUG][dub] [measure] measure=synth id=6 pass=1 rate=0.900 tgt_chars=17 speech_len=0.843 src_speech=1.000
+[23/08/2026-18:11:46][DEBUG][dub] [measure] measure=synth id=7 pass=1 rate=0.900 tgt_chars=20 speech_len=1.287 src_speech=2.100
+[23/08/2026-18:11:47][DEBUG][dub] [measure] measure=synth id=8 pass=1 rate=0.900 tgt_chars=25 speech_len=1.431 src_speech=1.799
+[23/08/2026-18:11:48][DEBUG][dub] [measure] measure=synth id=9 pass=1 rate=0.900 tgt_chars=16 speech_len=0.816 src_speech=1.799
+[23/08/2026-18:11:50][DEBUG][dub] [measure] measure=synth id=10 pass=1 rate=0.900 tgt_chars=24 speech_len=1.271 src_speech=1.780
+[23/08/2026-18:11:51][DEBUG][dub] [measure] measure=synth id=11 pass=1 rate=0.900 tgt_chars=18 speech_len=1.062 src_speech=1.260
+[23/08/2026-18:11:53][DEBUG][dub] [measure] measure=synth id=12 pass=1 rate=0.900 tgt_chars=18 speech_len=1.058 src_speech=1.140
+[23/08/2026-18:11:55][DEBUG][dub] [measure] measure=synth id=13 pass=1 rate=0.900 tgt_chars=29 speech_len=1.345 src_speech=1.719
+[23/08/2026-18:11:57][DEBUG][dub] [measure] measure=synth id=14 pass=1 rate=0.900 tgt_chars=19 speech_len=0.981 src_speech=2.160
+[23/08/2026-18:11:58][DEBUG][dub] [measure] measure=synth id=15 pass=1 rate=0.900 tgt_chars=11 speech_len=0.563 src_speech=0.520
+[23/08/2026-18:11:59][DEBUG][dub] [measure] measure=synth id=16 pass=1 rate=0.900 tgt_chars=12 speech_len=0.570 src_speech=0.961
