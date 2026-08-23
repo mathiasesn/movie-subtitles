@@ -87,7 +87,8 @@ movie_subtitles/
   mux.py                  # mux_dub(): overlays a finished audio track over the source video
                            # with ffmpeg, keeping the original audio underneath rather
                            # than replacing it -- mixed in via `amix=normalize=0`,
-                           # ducked to `_DUCK_LEVEL` inside the caller's `speech_spans`,
+                           # ducked to `duck_level` (`--duck-level`, default
+                           # `_DUCK_LEVEL = 0.25`) inside the caller's `speech_spans`,
                            # falling back to the old dub-only mapping when
                            # `ffmpeg.probe_audio_format()` returns `None` (no audio
                            # track to mix)

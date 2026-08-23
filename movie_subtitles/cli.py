@@ -353,8 +353,8 @@ def _dub_and_mux(
     tts: TTSProvider,
     dub_workers: int,
     dub_correction_passes: int,
+    duck_level: float,
     voices: dict[str | None, str | None] = _NO_VOICES,
-    duck_level: float = 0.25,
 ) -> None:
     from movie_subtitles.dub import synthesise_track
     from movie_subtitles.mux import mux_dub
