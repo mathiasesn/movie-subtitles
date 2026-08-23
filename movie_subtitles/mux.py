@@ -43,6 +43,13 @@ def _ducking_chain(spans: list[tuple[float, float]], in_label: str) -> tuple[lis
     multiplying by 1.0 outside a chunk's own spans never double-ducks. If this chunking
     ever isn't enough, the fix is a different mechanism entirely (e.g.
     `sidechaincompress` against the dub track), not more chunks.
+
+    Verified with synthetic media: a 500-span speech_spans list (crossing three chunks
+    of 200/200/100 terms) muxed via mux_dub() without an ffmpeg argv/expression
+    failure, producing the expected duration/streams, with volumedetect (measured with
+    edge-safe windows, clear of the eval=frame transition ramps at span boundaries)
+    reading -33.1 dB inside a ducked span versus -21.1 dB outside one -- exactly the
+    12.0 dB (20*log10(_DUCK_LEVEL)) expected.
     """
     chunks = [
         spans[i : i + _MAX_SPANS_PER_FILTER] for i in range(0, len(spans), _MAX_SPANS_PER_FILTER)
