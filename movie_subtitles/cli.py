@@ -73,6 +73,18 @@ _DEGENERATE_MIN_SEGMENTS = 11
 _DEGENERATE_MIN_PROPORTION = 0.5
 
 
+def _warns_degenerate(segment_count: int, near_fixed_cadence: int) -> bool:
+    """The degenerate-timings rule: the tally clears its floor and dominates the run.
+
+    No zero-division guard is needed: `and` short-circuits, and a tally above the
+    floor already implies segment_count > 0.
+    """
+    return (
+        near_fixed_cadence > _DEGENERATE_MIN_SEGMENTS
+        and near_fixed_cadence / segment_count > _DEGENERATE_MIN_PROPORTION
+    )
+
+
 def _budget_chars(start: float, end: float) -> int:
     """Derive a translation length budget (in characters) from a segment's duration."""
     duration = max(end - start, 0.0)
@@ -275,9 +287,8 @@ def create_subtitles(
     near_fixed_cadence = 0
     for segment in tqdm(segments, desc="Writing to srt file"):
         segment_count += 1
-        if abs((segment.end - segment.start) - _DEGENERATE_CUE_SECONDS) <= (
-            _DEGENERATE_CUE_TOLERANCE
-        ):
+        duration = segment.end - segment.start
+        if abs(duration - _DEGENERATE_CUE_SECONDS) <= _DEGENERATE_CUE_TOLERANCE:
             near_fixed_cadence += 1
 
         budget_chars = _budget_chars(segment.start, segment.end)
@@ -298,11 +309,7 @@ def create_subtitles(
     if pending is not None:
         _flush_pending(pending, None)
 
-    if (
-        segment_count > 0
-        and near_fixed_cadence > _DEGENERATE_MIN_SEGMENTS
-        and near_fixed_cadence / segment_count > _DEGENERATE_MIN_PROPORTION
-    ):
+    if _warns_degenerate(segment_count, near_fixed_cadence):
         logger.warning(
             f"{near_fixed_cadence} of {segment_count} ASR segments have a duration of "
             f"~{_DEGENERATE_CUE_SECONDS:.3f}s: the ASR timestamps look degenerate, "
