@@ -196,7 +196,13 @@ def _split_segment_by_speaker(
                 id=next_id,
                 start=run_words[0].start,
                 end=run_words[-1].end,
-                text=" ".join(w.text.strip() for w in run_words).strip(),
+                # Concatenate raw tokens rather than joining with a space: both
+                # faster-whisper and the OpenAI API already carry their own leading
+                # whitespace on each word where the language uses it (e.g. " world"),
+                # so plain concatenation preserves original spacing for space-delimited
+                # languages while staying correct for CJK/Thai, which a " ".join would
+                # corrupt by injecting spurious spaces.
+                text="".join(w.text for w in run_words).strip(),
                 words=run_words,
                 speaker=word_speakers[run_start_i],
             )
@@ -399,7 +405,7 @@ def create_subtitles(
         resolved_asr_engine, whisper_model_name, diarize=voice_match != "off"
     )
     segments = transcriber(fpath, audio_lang)
-    if needs_diarization:
+    if turns:
         segments = _diarized_segments(segments, turns)
 
     srt_lines = []
