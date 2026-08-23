@@ -395,18 +395,23 @@ def _dub_and_mux(
         # (see separate.py's module docstring), so an ImportError here means the install
         # is broken, not that separation merely failed at runtime. That must propagate
         # and fail the run, not be swallowed into a WARNING and a silent fallback --
-        # only a genuine runtime failure (unreachable weights, a bad input file, a
+        # any ImportError on this path (including one raised lazily from inside
+        # Separate.__init__, which imports torch/demucs.api itself) propagates; only a
+        # genuine runtime failure (unreachable weights, a bad input file, a
         # decode/inference error) degrades gracefully.
         from movie_subtitles.separate import Separate
 
         try:
             separator = Separate()
             background_path = separator(fpath, Path(stem_dir) / f"{fpath.stem}.accompaniment.wav")
+        except ImportError:
+            raise
         except Exception as exc:
             # Separation is a nice-to-have on top of the #22 duck-and-mix path, not a
             # hard requirement of --dub: unreachable model weights, a bad input file, or
-            # any decode/inference error must never fail the whole run. Falling back to
-            # ducking the original audio instead.
+            # any decode/inference error must never fail the whole run -- an ImportError
+            # is caught above and re-raised, since that means a broken install, not a
+            # runtime failure. Falling back to ducking the original audio instead.
             logger.warning(
                 f"Source separation failed ({exc}); falling back to ducking the "
                 "original audio instead of muxing over an accompaniment stem."
