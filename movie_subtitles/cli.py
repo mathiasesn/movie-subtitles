@@ -59,6 +59,34 @@ _CHARS_PER_SECOND = 15.0
 # violation (B006), so this module-level constant stands in for it; never mutated.
 _NO_VOICES: dict[str | None, str | None] = {}
 
+# Degenerate-ASR-timings detection, all product policy tuned against the single
+# observed sample (98 of 106 segments exactly 1.000s on a ~137s trailer, see
+# specs/fix-smoke-run-findings.md): a segment whose duration is within
+# _DEGENERATE_CUE_TOLERANCE of _DEGENERATE_CUE_SECONDS counts toward the stuck-cadence
+# tally (the tolerance, not exact equality, so a vendor jittering the cadence by a
+# millisecond still matches), and the run warns only when the tally both clears the
+# absolute floor _DEGENERATE_MIN_SEGMENTS (protecting short genuinely-dialogue clips --
+# a 20-cue interview clip with 11 one-second cues is plausible dialogue, not a stuck
+# cadence, so the floor sits just above it) and exceeds _DEGENERATE_MIN_PROPORTION of
+# all segments (protecting long dialogue, where occasional 1.000s cues are normal).
+# Re-tune when a second real-world degenerate sample appears.
+_DEGENERATE_CUE_SECONDS = 1.0
+_DEGENERATE_CUE_TOLERANCE = 0.05
+_DEGENERATE_MIN_SEGMENTS = 11
+_DEGENERATE_MIN_PROPORTION = 0.5
+
+
+def _warns_degenerate(segment_count: int, near_fixed_cadence: int) -> bool:
+    """The degenerate-timings rule: the tally clears its floor and dominates the run.
+
+    No zero-division guard is needed: `and` short-circuits, and a tally above the
+    floor already implies segment_count > 0.
+    """
+    return (
+        near_fixed_cadence > _DEGENERATE_MIN_SEGMENTS
+        and near_fixed_cadence / segment_count > _DEGENERATE_MIN_PROPORTION
+    )
+
 
 def _budget_chars(start: float, end: float) -> int:
     """Derive a translation length budget (in characters) from a segment's duration."""
@@ -311,7 +339,19 @@ def create_subtitles(
         srt_lines.append(format_block(p_id, p_start, pad_cue_end(p_end, next_start), p_text))
 
     pending: tuple[int, float, float, str] | None = None
+    # Running aggregates for the degenerate-timings check (the whisper-1 fixed-cadence
+    # vendor defect): two counters only, so `segments` stays a single lazy pass. Every
+    # segment counts toward the total -- including ones the translator empties, whose
+    # timings are just as much evidence -- and the tally uses the RAW segment times,
+    # never the padded cue times (padding is a write-time .srt concern).
+    segment_count = 0
+    near_fixed_cadence = 0
     for segment in tqdm(segments, desc="Writing to srt file"):
+        segment_count += 1
+        duration = segment.end - segment.start
+        if abs(duration - _DEGENERATE_CUE_SECONDS) <= _DEGENERATE_CUE_TOLERANCE:
+            near_fixed_cadence += 1
+
         budget_chars = _budget_chars(segment.start, segment.end)
         text = translator(segment.text, srt_lang, budget_chars=budget_chars)
         if not text:
@@ -329,6 +369,16 @@ def create_subtitles(
 
     if pending is not None:
         _flush_pending(pending, None)
+
+    if _warns_degenerate(segment_count, near_fixed_cadence):
+        logger.warning(
+            f"{near_fixed_cadence} of {segment_count} ASR segments have a duration of "
+            f"~{_DEGENERATE_CUE_SECONDS:.3f}s: the ASR timestamps look degenerate, "
+            "degrading to a fixed ~1s cadence (observed with --asr-engine openai's "
+            "whisper-1 on music-heavy or dialogue-sparse audio). The .srt's cue "
+            "timings, and any dub slots derived from them, are likely wrong. "
+            "Re-run with --asr-engine elevenlabs on such material."
+        )
 
     srt_file.write_text("".join(srt_lines), encoding="utf-8")
     logger.info(f"Saved srt file to {srt_file}")
