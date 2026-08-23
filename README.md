@@ -211,10 +211,12 @@ speaking" until this feature.
 ### Dubbing notes
 
 - **Emitted `.srt` cue ends are padded, not raw ASR timings.** At write time, each cue's end is extended by up to `_CUE_PAD` (0.5s) toward the next cue's start (never past it, and never before the cue's own end) for subtitle readability. This applies to every `.srt` output, not only `--dub` runs; `dub.py` groups, anchors, and measures drift against the unpadded, word-accurate segment timings, so this only affects the written `.srt` file.
-- **`--dub` keeps the original audio underneath the synthesised track**, ducked to
-  25% while the dub is speaking so the translated dialogue stays dominant but music,
-  effects and ambience survive rather than being dropped. A source with no audio
-  stream at all falls back to a dub-only track.
+- **`--dub` keeps the original audio underneath the synthesised track**, ducked
+  (via `--duck-level`, default `0.25`) while the dub is speaking so the translated
+  dialogue stays dominant but music, effects and ambience survive rather than being
+  dropped. `--duck-level 0.0` silences the original entirely under the dub;
+  `--duck-level 1.0` disables ducking altogether. A source with no audio stream at
+  all falls back to a dub-only track.
 - **`--dub` and `--managed` are mutually exclusive.** `--managed` replaces the whole
   pipeline with a single hosted job.
 - **`--dub` fails if TTS resolves to something unusable**, e.g. plain `--engine local

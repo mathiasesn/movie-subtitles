@@ -24,7 +24,9 @@ _MIX_INPUT_GAIN = 0.7
 _MAX_SPANS_PER_FILTER = 200
 
 
-def _ducking_chain(spans: list[tuple[float, float]], in_label: str) -> tuple[list[str], str]:
+def _ducking_chain(
+    spans: list[tuple[float, float]], in_label: str, duck_level: float
+) -> tuple[list[str], str]:
     """Chained `volume` filter statements that duck `in_label` only inside `spans`.
 
     Returns `(statements, out_label)`: the statements to splice into a `-filter_complex`
@@ -49,7 +51,8 @@ def _ducking_chain(spans: list[tuple[float, float]], in_label: str) -> tuple[lis
     failure, producing the expected duration/streams, with volumedetect (measured with
     edge-safe windows, clear of the eval=frame transition ramps at span boundaries)
     reading -33.1 dB inside a ducked span versus -21.1 dB outside one -- exactly the
-    12.0 dB (20*log10(_DUCK_LEVEL)) expected.
+    12.0 dB (20*log10(0.25)) expected at that (default) duck level; a different
+    `duck_level` scales this attenuation accordingly.
     """
     chunks = [
         spans[i : i + _MAX_SPANS_PER_FILTER] for i in range(0, len(spans), _MAX_SPANS_PER_FILTER)
@@ -58,7 +61,7 @@ def _ducking_chain(spans: list[tuple[float, float]], in_label: str) -> tuple[lis
     label = in_label
     for i, chunk in enumerate(chunks):
         terms = "+".join(f"between(t,{start:.3f},{end:.3f})" for start, end in chunk)
-        expr = f"volume='if(gt({terms},0),{_DUCK_LEVEL},1)':eval=frame"
+        expr = f"volume='if(gt({terms},0),{duck_level},1)':eval=frame"
         out_label = f"duck{i}"
         statements.append(f"[{label}]{expr}[{out_label}]")
         label = out_label
@@ -70,14 +73,15 @@ def mux_dub(
     audio_path: Path,
     *,
     speech_spans: list[tuple[float, float]] | None = None,
+    duck_level: float = _DUCK_LEVEL,
 ) -> Path:
     """Overlay `audio_path` onto `video_path`'s video track via ffmpeg.
 
     Writes `<video>.dubbed<ext>` next to `video_path` and returns that path. When the
     source has an audio track, the output keeps it underneath the dub rather than
     dropping it: the original is mixed with the synthesised track (`amix=normalize=0`),
-    ducked to `_DUCK_LEVEL` while `speech_spans` says the dub is speaking so the
-    translated dialogue stays dominant. `speech_spans` is a list of `(start, end)`
+    ducked to `duck_level` (default `_DUCK_LEVEL`) while `speech_spans` says the dub is
+    speaking so the translated dialogue stays dominant. `speech_spans` is a list of `(start, end)`
     windows in seconds (typically `dub.synthesise_track()`'s second return value);
     omitting it (or passing an empty list) mixes the original in unducked throughout.
     A source with no audio stream at all (per `ffmpeg.probe_audio_format` returning
@@ -118,7 +122,7 @@ def mux_dub(
         audio_map = "1:a:0"
     else:
         spans = speech_spans or []
-        duck_statements, ducked_label = _ducking_chain(spans, "0:a:0")
+        duck_statements, ducked_label = _ducking_chain(spans, "0:a:0", duck_level)
 
         # Target the *source's* own channel layout/sample rate rather than a fixed
         # stereo/48kHz pair -- this whole feature exists to preserve the original
