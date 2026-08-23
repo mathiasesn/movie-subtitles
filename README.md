@@ -43,6 +43,12 @@ cd movie-subtitles && uv sync && uv run movie-subtitles --help
 Requires Python >= 3.10 and [uv](https://docs.astral.sh/uv/getting-started/installation/).
 `ffmpeg` must be on `PATH` for `--dub`; the plain `.srt` path and `--managed` do not need it.
 
+**Intel Mac (`x86_64` macOS) is no longer supported.** Speaker diarisation on
+`--asr-engine local`/`openai` (see below) is backed by `pyannote.audio>=4.0`, which pulls
+in torch 2.13.0 as a hard dependency — that release publishes no `x86_64` macOS wheel.
+This collapsed what used to be a two-branch torch pin (a separate, older torch build for
+Intel Macs) down to one. If you're on an Intel Mac, `uv sync` will fail to resolve.
+
 ## Engines
 
 The pipeline has three stages, each backed by a vendor you choose independently:
@@ -79,18 +85,35 @@ timings and dub slots. Prefer `--asr-engine elevenlabs` on such material.
 
 ## API keys
 
-`--engine local` needs no keys and stays fully offline after the first model download.
-Everything else reads one or more of:
+`--engine local` needs no keys and stays fully offline after the first model download —
+**as long as `--voice-match off` is passed.** Any other `--voice-match` value (`auto`,
+the default, included) runs a speaker-diarisation pass that contacts Hugging Face on
+first use; see "Speaker-matched dub voices" below. Everything else reads one or more of:
 
 ```shell
 export ELEVENLABS_API_KEY="..."   # --asr-engine/--tts-engine elevenlabs, --managed
 export ANTHROPIC_API_KEY="..."    # --translation-engine anthropic
 export OPENAI_API_KEY="..."       # any stage set to openai
+export HF_TOKEN="..."             # --voice-match != off on --asr-engine local/openai
 ```
 
 Or copy `.env.example` to `.env` and fill it in — `.env` is gitignored and loaded on
 startup, searching upward from the directory you run in. Exported variables take
 precedence. A missing key exits with a one-line error naming the variable, no traceback.
+
+**`HF_TOKEN` setup:** speaker diarisation on `--asr-engine local`/`openai` uses
+[`pyannote/speaker-diarization-community-1`](https://huggingface.co/pyannote/speaker-diarization-community-1),
+a gated model. Before it will load:
+
+1. Log in (or sign up) at [huggingface.co](https://huggingface.co).
+2. Visit the [model page](https://huggingface.co/pyannote/speaker-diarization-community-1)
+   and accept its conditions.
+3. Create an access token at
+   [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) and set it as
+   `HF_TOKEN`.
+
+Skipping this (or `--asr-engine elevenlabs`, which diarizes without it) is fine as long as
+you also pass `--voice-match off` — no token, no diarisation pass, no network call.
 
 ## Usage
 
@@ -122,8 +145,15 @@ Run `movie-subtitles --help` for the full list.
 ### Speaker-matched dub voices
 
 `--asr-engine elevenlabs` diarizes the audio (Scribe's `diarize=True`, on by
-default) and tags every `Segment` with a `speaker` label. Under `--dub`, this
-label drives which TTS voice speaks each line:
+default) and tags every `Segment` with a `speaker` label. `--asr-engine local` and
+`--asr-engine openai` don't diarize natively, but get the same labelling: whenever
+`--voice-match` is anything other than `off`, a standalone
+[`pyannote.audio`](https://github.com/pyannote/pyannote-audio) diarisation pass
+(`pyannote/speaker-diarization-community-1`) runs over the whole source file first, and
+its speaker turns are merged onto each ASR segment by temporal overlap. There is no
+separate flag for this — `--voice-match` is the single control for "do I care about
+speakers?" across all three ASR engines. Under `--dub`, the resulting `speaker` label
+drives which TTS voice speaks each line:
 
 | Flag | Default | Effect |
 | --- | --- | --- |
@@ -199,8 +229,31 @@ profile key, a non-string voice id, or a missing `default` — not a mid-dub
 `--dub`: any `--asr-engine elevenlabs` run (with diarization on, the default) will
 produce more, shorter cues than before whenever a scene contains dialogue between
 multiple speakers, because a cue is flushed as soon as the diarized speaker changes.
-Plain `--asr-engine local`/`openai` runs are unaffected — they carry no speaker
-labels.
+`--asr-engine local`/`openai` now split the same way whenever `--voice-match != off`
+(the diarisation pass above populates `speaker`, and both engines now also request
+word-level timestamps, which is what makes splitting on a mid-cue speaker change
+possible at all). `--voice-match off` reproduces the old unsplit, single-voice output
+on every engine, byte-for-byte.
+
+**Diarising `local`/`openai` audio also shifts dub timing slightly**, independent of
+`--voice-match`'s value: both engines now request word timestamps unconditionally (not
+only when diarising), and `dub.py` prefers word-level inter-segment gaps over
+cue-boundary gaps when they're available. This is a strict improvement to scene
+grouping, not a change to the timing/rate-fitting model itself, but it does mean dub
+output on these two engines can differ slightly from earlier runs.
+
+**`--asr-engine openai` caveat:** speaker labels there are assigned by overlapping
+diarisation turns against `whisper-1`'s own segment spans, and `whisper-1`'s segment
+timestamps are known to degrade to uniform 1.000s spans on music-heavy or
+dialogue-sparse audio (see "Known limitation" above). Where that fires, diarisation
+produces confidently wrong labels rather than merely absent ones — the run logs a
+WARNING recommending `--asr-engine elevenlabs` for multi-speaker material.
+
+**Diarisation degrades rather than fails the run.** A missing/invalid `HF_TOKEN`, an
+unaccepted model gate, an unreachable Hugging Face Hub, or any other diarisation
+runtime error logs one WARNING and falls back to today's single-voice dub — it does not
+abort the run. Only a broken install (an `ImportError` — `pyannote.audio` itself
+missing) fails it, the same split `--separate-background` uses for Demucs.
 
 **vs. `--managed`:** the ElevenLabs Dubbing job API used by `--managed` has always
 handled multi-speaker audio internally, including its own voice matching — none of
