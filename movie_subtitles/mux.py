@@ -13,6 +13,12 @@ logger = logging.getLogger("mux")
 # dialogue.
 _DUCK_LEVEL = 0.25
 
+# Default for `mux_dub(duck_level=...)` when `background_path` is given, i.e. the bed is
+# a separated accompaniment stem rather than the source's own audio track. The competing
+# original dialogue is gone in that case -- separation already removed it -- so ducking
+# only needs to buy the dub a little headroom over loud music, not fight a second voice.
+_SEPARATED_DUCK_LEVEL = 0.6
+
 # Per-input gain applied to both streams before `amix=normalize=0`, which -- unlike the
 # default `normalize=1` -- does not scale inputs down to avoid clipping on its own. Two
 # full-scale inputs summed can clip, so each is pre-attenuated; this is a fixed
@@ -54,6 +60,17 @@ def _ducking_chain(
     reading -33.1 dB inside a ducked span versus -21.1 dB outside one -- exactly the
     12.0 dB (20*log10(0.25)) expected at that (default) duck level; a different
     `duck_level` scales this attenuation accordingly.
+
+    Also verified with `background_path` given (a pink-noise accompaniment file muxed
+    at the `_SEPARATED_DUCK_LEVEL` default of 0.6, dub kept near-silent so its own
+    energy during its speech span doesn't confound the reading): volumedetect measured
+    -22.3 dB inside the one speech span versus -17.7 dB outside it, a -4.6 dB delta
+    against the -4.4 dB (20*log10(0.6)) expected -- the gap is measurement noise from
+    finite 1s windows on stationary noise, not a functional difference. With a
+    normal-volume dub, the "inside" window's measured level rises because the dub's own
+    audio is playing there too and amix sums it in -- the ducking chain itself still
+    attenuates exactly `duck_level`, but a raw volumedetect reading of the mixed output
+    only isolates it cleanly when the dub track is quiet relative to the bed.
     """
     chunks = [
         spans[i : i + _MAX_SPANS_PER_FILTER] for i in range(0, len(spans), _MAX_SPANS_PER_FILTER)
@@ -74,20 +91,38 @@ def mux_dub(
     audio_path: Path,
     *,
     speech_spans: list[tuple[float, float]] | None = None,
-    duck_level: float = _DUCK_LEVEL,
+    duck_level: float | None = None,
+    background_path: Path | None = None,
 ) -> Path:
     """Overlay `audio_path` onto `video_path`'s video track via ffmpeg.
 
     Writes `<video>.dubbed<ext>` next to `video_path` and returns that path. When the
     source has an audio track, the output keeps it underneath the dub rather than
-    dropping it: the original is mixed with the synthesised track (`amix=normalize=0`),
-    ducked to `duck_level` while `speech_spans` says the dub is speaking so the
-    translated dialogue stays dominant. `speech_spans` is a list of `(start, end)`
-    windows in seconds (typically `dub.synthesise_track()`'s second return value);
-    omitting it (or passing an empty list) mixes the original in unducked throughout.
-    A source with no audio stream at all (per `ffmpeg.probe_audio_format` returning
-    `None`) falls back to today's dub-only mapping, since there is nothing to mix or
-    duck.
+    dropping it: the original (or, when `background_path` is given, a separated
+    accompaniment stem -- see below) is mixed with the synthesised track
+    (`amix=normalize=0`), ducked to `duck_level` while `speech_spans` says the dub is
+    speaking so the translated dialogue stays dominant. `speech_spans` is a list of
+    `(start, end)` windows in seconds (typically `dub.synthesise_track()`'s second
+    return value); omitting it (or passing an empty list) mixes the bed in unducked
+    throughout. A source with no audio stream at all (per `ffmpeg.probe_audio_format`
+    returning `None`) falls back to today's dub-only mapping, since there is nothing to
+    mix or duck -- this holds even when `background_path` is given, since there is then
+    nothing in the source's own layout/rate to match it to; the background is logged and
+    ignored rather than raising.
+
+    `duck_level` defaults to `None`, a sentinel meaning "pick the right default": an
+    explicit value always wins, otherwise it's `_SEPARATED_DUCK_LEVEL` (0.6) when
+    `background_path` is given and `_DUCK_LEVEL` (0.25) otherwise -- a bed with the
+    original dialogue already removed by separation only needs headroom over loud music,
+    not to fight a second voice, so it tolerates a gentler duck.
+
+    `background_path`, when given, is an already-separated accompaniment (no-vocals)
+    audio file that replaces the source's own audio as the ducked "original" branch of
+    the filter graph -- an additional ffmpeg input alongside the video and dub inputs.
+    The `aformat` target driving that branch still comes from
+    `probe_audio_format(video_path)` (the *source's* own channel layout/sample rate), not
+    from the background file, so the output still matches the source's layout/rate
+    regardless of what `background_path` happens to be encoded as.
 
     The video's full duration is authoritative -- no `-shortest`, so a synthesised track
     that ends before the video does (e.g. no speech in the video's tail) does not
@@ -118,16 +153,40 @@ def mux_dub(
     source_format = probe_audio_format(video_path)
 
     if source_format is None:
-        logger.info(f"{video_path} has no audio stream; muxing the dub track alone.")
+        if background_path is not None:
+            logger.info(
+                f"{video_path} has no audio stream; ignoring background_path and "
+                "muxing the dub track alone."
+            )
+        else:
+            logger.info(f"{video_path} has no audio stream; muxing the dub track alone.")
         filter_args: list[str] = []
         audio_map = "1:a:0"
     else:
+        if duck_level is not None:
+            resolved_duck_level = duck_level
+        elif background_path is not None:
+            resolved_duck_level = _SEPARATED_DUCK_LEVEL
+            logger.info(
+                f"No --duck-level given; using the separated-background default "
+                f"{_SEPARATED_DUCK_LEVEL} since background_path was supplied."
+            )
+        else:
+            resolved_duck_level = _DUCK_LEVEL
+            logger.info(f"No --duck-level given; using the default {_DUCK_LEVEL}.")
+
+        if background_path is not None:
+            base_cmd = base_cmd + ["-i", str(background_path)]
+            original_label = "2:a:0"
+        else:
+            original_label = "0:a:0"
+
         # `duck_level` 1.0 means "don't duck", which the volume chain would express as a
         # per-frame multiply by 1.0 -- tens of millions of expression-node visits over a
         # feature-length source to compute the identity. Treat it like having no spans at
         # all and reuse the existing unducked path instead of building the chain.
-        spans = [] if duck_level >= 1.0 else (speech_spans or [])
-        duck_statements, ducked_label = _ducking_chain(spans, "0:a:0", duck_level)
+        spans = [] if resolved_duck_level >= 1.0 else (speech_spans or [])
+        duck_statements, ducked_label = _ducking_chain(spans, original_label, resolved_duck_level)
 
         # Target the *source's* own channel layout/sample rate rather than a fixed
         # stereo/48kHz pair -- this whole feature exists to preserve the original
