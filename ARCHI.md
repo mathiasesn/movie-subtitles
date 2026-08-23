@@ -43,9 +43,15 @@ Written for AI coding agents working on this repo. It states the stack, the exac
 
 ```
 movie_subtitles/
-  __init__.py             # side-effecting: configures root logging (stdout) on import, level
-                           # from MOVIE_SUBTITLES_LOG_LEVEL (default INFO; falls back to INFO
-                           # on an unset or unrecognised value)
+  __init__.py             # side-effecting: configures root logging (stdout, INFO) on import,
+                           # then configure_logging() applies MOVIE_SUBTITLES_LOG_LEVEL to this
+                           # package's own loggers only (_PACKAGE_LOGGERS -- they are flat,
+                           # "dub" not "movie_subtitles.dub", so there is no ancestor to set).
+                           # Root stays INFO on purpose: raising it also enables vendor
+                           # (httpcore/openai/anthropic) DEBUG, which drowns our own lines.
+                           # cli.main() re-calls configure_logging() after _load_env(), so the
+                           # variable also works when set in .env. Unset or unrecognised
+                           # falls back to INFO
   cli.py                  # argparse entry point + create_subtitles() orchestration, engine
                            # selection, translation-budget derivation, top-level error handling.
                            # Diarisation is orchestration only here (issue #27's algorithm now

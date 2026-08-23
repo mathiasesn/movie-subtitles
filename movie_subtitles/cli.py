@@ -9,6 +9,7 @@ from pathlib import Path
 from dotenv import find_dotenv, load_dotenv
 from tqdm.auto import tqdm
 
+from movie_subtitles import configure_logging
 from movie_subtitles.diarize import label_segments
 from movie_subtitles.ffmpeg import extract_mono_wav
 from movie_subtitles.providers.base import (
@@ -124,7 +125,9 @@ def _budget_chars(start: float, end: float, text: str, output_lang: str) -> int:
     """
     duration = max(end - start, 0.0)
     ratio = _EXPANSION_RATIO.get(output_lang, _EXPANSION_RATIO["default"])
-    return max(int(min(len(text) * ratio, duration * _MAX_SPEAKABLE_CPS)), 1)
+    expected = len(text) * ratio
+    fits_in_slot = duration * _MAX_SPEAKABLE_CPS
+    return max(int(min(expected, fits_in_slot)), 1)
 
 
 def _build_asr_provider(
@@ -606,6 +609,10 @@ def _load_env() -> None:
 
 def main() -> None:
     _load_env()
+    # Re-apply now that .env is loaded: MOVIE_SUBTITLES_LOG_LEVEL was read once at
+    # import, before _load_env() ran, so a value living only in .env would otherwise
+    # never take effect -- unlike every other variable that file holds.
+    configure_logging()
 
     parser = ArgumentParser(
         "Command line interface for movie subtitles",
