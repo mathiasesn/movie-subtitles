@@ -149,8 +149,8 @@ default) and tags every `Segment` with a `speaker` label. `--asr-engine local` a
 `--asr-engine openai` don't diarize natively, but get the same labelling: whenever
 `--voice-match` is anything other than `off`, a standalone
 [`pyannote.audio`](https://github.com/pyannote/pyannote-audio) diarisation pass
-(`pyannote/speaker-diarization-community-1`) runs over the whole source file first, and
-its speaker turns are merged onto each ASR segment by temporal overlap. There is no
+(`pyannote/speaker-diarization-community-1`) runs first, over audio extracted from the
+source file, and its speaker turns are merged onto each ASR segment by temporal overlap. There is no
 separate flag for this — `--voice-match` is the single control for "do I care about
 speakers?" across all three ASR engines. Under `--dub`, the resulting `speaker` label
 drives which TTS voice speaks each line:
