@@ -30,6 +30,11 @@ dependencies = [
     # but a directly-imported package must be declared per this repo's convention
     # (see the accelerate entry above).
     "numpy",
+    # separate.py's --separate-background path: Demucs source separation
+    # (vocals/accompaniment stems) for mux.py to mix the dub over. separate.py goes
+    # through demucs.api.Separator, which owns the decode and the write too, so no
+    # separate audio-I/O library is needed alongside it.
+    "demucs",
 ]
 
 [project.urls]
