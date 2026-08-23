@@ -116,8 +116,8 @@ movie-subtitles --input clip.mp4 --managed
 ```
 
 Other flags: `--audio-lang`, `--srt-lang`, `--whisper-model`, `--mt-model`,
-`--dub-workers`, `--dub-correction-passes`. Run `movie-subtitles --help` for the
-full list.
+`--dub-workers`, `--dub-correction-passes`, `--duck-level`, `--separate-background`.
+Run `movie-subtitles --help` for the full list.
 
 ### Speaker-matched dub voices
 
@@ -212,11 +212,35 @@ speaking" until this feature.
 
 - **Emitted `.srt` cue ends are padded, not raw ASR timings.** At write time, each cue's end is extended by up to `_CUE_PAD` (0.5s) toward the next cue's start (never past it, and never before the cue's own end) for subtitle readability. This applies to every `.srt` output, not only `--dub` runs; `dub.py` groups, anchors, and measures drift against the unpadded, word-accurate segment timings, so this only affects the written `.srt` file.
 - **`--dub` keeps the original audio underneath the synthesised track**, ducked
-  (via `--duck-level`, default `0.25`) while the dub is speaking so the translated
-  dialogue stays dominant but music, effects and ambience survive rather than being
-  dropped. `--duck-level 0.0` silences the original entirely under the dub;
-  `--duck-level 1.0` disables ducking altogether. A source with no audio stream at
-  all falls back to a dub-only track.
+  (via `--duck-level`, default `0.25`, or `0.6` when `--separate-background`
+  succeeded — see below) while the dub is speaking so the translated dialogue stays
+  dominant but music, effects and ambience survive rather than being dropped.
+  `--duck-level 0.0` silences that bed entirely under the dub; `--duck-level 1.0`
+  disables ducking altogether. An explicit `--duck-level` always wins over either
+  default. A source with no audio stream at all falls back to a dub-only track.
+- **`--separate-background` removes the original dialogue instead of merely
+  ducking it.** By default the original audio is only attenuated under the dub, so
+  both languages are still audible at once during every cue. Passing
+  `--separate-background` runs [Demucs](https://github.com/facebookresearch/demucs)
+  (`htdemucs`) over the source audio first, splitting it into a vocals stem and an
+  accompaniment (everything else) stem, and mixes the dub over the accompaniment
+  stem only — the original dialogue is gone, not ducked. It's opt-in for real
+  reasons:
+  - **Cost:** Demucs runs on CPU by default and takes CPU-minutes to tens of
+    minutes on a feature-length film; the first run also downloads model weights
+    (hundreds of MB from a third-party host).
+  - **Not perfect:** separation leaves artifacts — some residual original-dialogue
+    bleed can remain, and music can smear slightly. The result is better than
+    ducking, not clean.
+  - **Fidelity cost on surround sources:** Demucs works internally at 44.1 kHz
+    stereo, so a 5.1/48 kHz source's accompaniment stem is downmixed to stereo
+    internally; `--dub`'s final muxed output still matches the source's own
+    layout/rate, only the separated bed loses surround information along the way.
+  - **Fails safe:** any separation failure (unreachable model weights, a bad input
+    file, an ffmpeg/Demucs error) logs one warning and falls straight back to the
+    default duck-and-mix behaviour above, rather than failing the run.
+  - **Mutually exclusive with `--managed`** — the managed ElevenLabs Dubbing job
+    already handles background preservation itself.
 - **`--dub` and `--managed` are mutually exclusive.** `--managed` replaces the whole
   pipeline with a single hosted job.
 - **`--dub` fails if TTS resolves to something unusable**, e.g. plain `--engine local
