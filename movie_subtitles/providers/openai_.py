@@ -5,7 +5,7 @@ from pathlib import Path
 
 from openai import OpenAI
 
-from movie_subtitles.providers.base import Segment
+from movie_subtitles.providers.base import Segment, Word
 from movie_subtitles.providers.prompt import SYSTEM_PROMPT, build_prompt
 
 logger = logging.getLogger("openai_provider")
@@ -66,11 +66,14 @@ class OpenAITranscribe:
 
         logger.info(f"Sending {fpath} to OpenAI transcriptions ({self.model})")
         with open(fpath, "rb") as audio_file:
+            # timestamp_granularities=["word"] (which requires verbose_json) is
+            # requested unconditionally -- it enables speaker-change cue splitting
+            # and improves dub.py's gap grouping. Do not "optimise" this away.
             response = self.client.audio.transcriptions.create(
                 file=audio_file,
                 model=self.model,
                 response_format="verbose_json",
-                timestamp_granularities=["segment"],
+                timestamp_granularities=["segment", "word"],
                 language=audio_lang,
             )
 
@@ -79,15 +82,48 @@ class OpenAITranscribe:
             raise RuntimeError(
                 f"OpenAI transcription response from model '{self.model}' has no "
                 "'segments' field. This model may not support segment timestamps "
-                "(response_format='verbose_json', timestamp_granularities=['segment']); "
+                "(response_format='verbose_json', "
+                "timestamp_granularities=['segment', 'word']); "
                 "try model='whisper-1' instead."
             )
-        return self._yield_segments(segments)
+        words = getattr(response, "words", None) or []
+        return self._yield_segments(segments, words)
 
-    def _yield_segments(self, segments: Iterable) -> Iterable[Segment]:
+    def _yield_segments(self, segments: Iterable, words: Iterable) -> Iterable[Segment]:
         # Split out from transcribe() so the missing-segments check above runs when
         # transcribe() is called, not when the first segment is pulled. Do not re-merge.
-        for segment_id, segment in enumerate(segments):
+        #
+        # The API returns words as one flat list across the whole file, not nested
+        # per segment, so each word is mapped into the segment whose [start, end)
+        # span contains it (by midpoint, to be tolerant of boundary rounding).
+        #
+        # Both segments and words are already in ascending time order, so a single
+        # moving cursor over segment_list suffices (two-pointer sweep) instead of
+        # rescanning every segment for every word: advance the cursor while the
+        # word's midpoint has passed the current segment's end, then test whether
+        # it falls inside that segment. Words in a gap before/between/after
+        # segments are dropped, same as before.
+        segment_list = list(segments)
+        words_by_index: dict[int, list[Word]] = {}
+        segment_index = 0
+        for word in words:
+            word_start = getattr(word, "start", None)
+            word_end = getattr(word, "end", None)
+            word_text = getattr(word, "word", "")
+            if word_start is None or word_end is None:
+                continue
+            midpoint = (word_start + word_end) / 2
+            while segment_index < len(segment_list) and midpoint >= segment_list[segment_index].end:
+                segment_index += 1
+            if segment_index >= len(segment_list):
+                break
+            segment = segment_list[segment_index]
+            if segment.start <= midpoint < segment.end:
+                words_by_index.setdefault(segment_index, []).append(
+                    Word(start=word_start, end=word_end, text=word_text)
+                )
+
+        for segment_id, segment in enumerate(segment_list):
             text = getattr(segment, "text", "").strip()
             if not text:
                 continue
@@ -96,6 +132,7 @@ class OpenAITranscribe:
                 start=segment.start,
                 end=segment.end,
                 text=text,
+                words=words_by_index.get(segment_id) or None,
             )
 
 
