@@ -5,7 +5,7 @@ from pathlib import Path
 from faster_whisper import WhisperModel
 from transformers import T5ForConditionalGeneration, T5Tokenizer
 
-from movie_subtitles.providers.base import Segment
+from movie_subtitles.providers.base import Segment, Word
 
 logger = logging.getLogger("local")
 
@@ -24,11 +24,15 @@ class Transcribe:
         if isinstance(fpath, Path):
             fpath = fpath.as_posix()
 
+        # word_timestamps enables speaker-change cue splitting downstream and improves
+        # dub.py's gap grouping -- do not "optimise" this away, it's requested
+        # unconditionally, not only when diarising.
         transcribe = self.model.transcribe(
             fpath,
             task="transcribe",
             language=audio_lang,
             vad_filter=True,
+            word_timestamps=True,
         )
 
         segments, info = transcribe
@@ -37,7 +41,17 @@ class Transcribe:
         )
 
         return (
-            Segment(id=segment.id, start=segment.start, end=segment.end, text=segment.text)
+            Segment(
+                id=segment.id,
+                start=segment.start,
+                end=segment.end,
+                text=segment.text,
+                words=(
+                    [Word(start=w.start, end=w.end, text=w.word) for w in segment.words]
+                    if segment.words
+                    else None
+                ),
+            )
             for segment in segments
         )
 

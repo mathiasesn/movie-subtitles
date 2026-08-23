@@ -35,6 +35,12 @@ dependencies = [
     # through demucs.api.Separator, which owns the decode and the write too, so no
     # separate audio-I/O library is needed alongside it.
     "demucs",
+    # local/openai ASR speaker diarisation: pyannote's speaker-diarization-community-1
+    # pipeline. Floored at 4.0 because unconstrained resolution picks 3.4.0, which
+    # cannot load that pipeline. This floor collapses the lock's two-branch torch pin
+    # (2.2.2 for x86_64 macOS, 2.13.0 elsewhere) down to torch 2.13.0 only, which has
+    # no x86_64 macOS wheel -- Intel Mac support is deliberately dropped as a result.
+    "pyannote.audio>=4.0",
 ]
 
 [project.urls]

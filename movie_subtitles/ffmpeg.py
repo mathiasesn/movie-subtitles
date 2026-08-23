@@ -44,6 +44,35 @@ def run(cmd: list[str], *, what: str) -> subprocess.CompletedProcess[str]:
     return result
 
 
+def extract_mono_wav(source: Path, out_path: Path, *, rate: int = 16000) -> None:
+    """Extract a mono, `rate`-Hz PCM wav from `source`'s audio, via a plain ffmpeg -i cut.
+
+    Used by `cli.py` ahead of speaker diarisation: pyannote.audio's torchaudio/torchcodec
+    loader may not be able to decode a video container the way demucs's ffmpeg-backed
+    `Separator` can, so a small mono wav is extracted first and handed to the diarizer
+    instead of the source media directly. `-acodec pcm_s16le` is spelled out explicitly
+    even though it is already ffmpeg's default encoder for a `.wav` suffix -- this is
+    documentation, not a behaviour change.
+    """
+    run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(source),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            str(rate),
+            "-acodec",
+            "pcm_s16le",
+            str(out_path),
+        ],
+        what=f"Extracting audio from {source.name} for diarisation",
+    )
+
+
 def _probe(fpath: Path, entries: str, *, select: str | None = None, of: str, what: str) -> str:
     """Shared ffprobe invocation: build the argv, run it, return raw stdout.
 
