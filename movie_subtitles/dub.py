@@ -203,6 +203,11 @@ def _synthesise_and_measure(
     clip_path = work_dir / f"segment_{segment.id:05d}_p{pass_num:02d}.mp3"
     _tts_with_retry(tts, text, clip_path, rate, voice)
     speech_start, speech_end = aligner(clip_path, text)
+    logger.debug(
+        f"[measure] measure=synth id={segment.id} pass={pass_num} rate={rate:.3f} "
+        f"tgt_chars={len(text)} speech_len={speech_end - speech_start:.3f} "
+        f"src_speech={_speech_duration(segment):.3f}"
+    )
     return _Clip(clip_path, speech_start, speech_end)
 
 

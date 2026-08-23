@@ -354,6 +354,12 @@ def create_subtitles(
 
         budget_chars = _budget_chars(segment.start, segment.end)
         text = translator(segment.text, srt_lang, budget_chars=budget_chars)
+        logger.debug(
+            f"[measure] measure=translate id={segment.id} start={segment.start:.3f} "
+            f"end={segment.end:.3f} slot={segment.end - segment.start:.3f} "
+            f"src_chars={len(segment.text)} tgt_chars={len(text)} budget={budget_chars} "
+            f"lang={srt_lang}"
+        )
         if not text:
             continue
 
