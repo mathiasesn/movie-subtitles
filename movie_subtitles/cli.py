@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import tempfile
 from argparse import ArgumentParser, ArgumentTypeError
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
@@ -12,9 +13,11 @@ from tqdm.auto import tqdm
 from movie_subtitles.providers.base import (
     AlignmentProvider,
     ASRProvider,
+    DiarizationProvider,
     Segment,
     TranslationProvider,
     TTSProvider,
+    Turn,
 )
 from movie_subtitles.srt import format_block, pad_cue_end
 from movie_subtitles.voices import (
@@ -88,6 +91,133 @@ def _build_asr_provider(
         return OpenAITranscribe()
     else:
         raise ValueError(f"Unknown ASR engine: {asr_engine}")
+
+
+def _build_diarizer(asr_engine: str, voice_match: str) -> DiarizationProvider | None:
+    """Build the pyannote.audio diarizer, or None when diarisation isn't needed.
+
+    Returns None when the resolved ASR engine already diarizes natively (elevenlabs,
+    via Scribe's diarize=True, see _build_asr_provider) or when --voice-match off asks
+    for today's single-voice behaviour. The pyannote.audio (and therefore torch) import
+    happens only inside this branch, so a run that doesn't need diarisation never pays
+    that import cost -- mirroring the lazy-import convention the other builders and
+    separate.py already follow.
+    """
+    if voice_match == "off" or asr_engine == "elevenlabs":
+        return None
+
+    from movie_subtitles.providers.pyannote_ import Diarize
+
+    return Diarize()
+
+
+def _speaker_for_span(
+    turns: list[Turn], start: float, end: float, start_idx: int
+) -> tuple[str | None, int]:
+    """Return the speaker with greatest overlap with [start, end), and a resume index.
+
+    `turns` is sorted by start and spans (word or cue) are visited in ascending time
+    order, so `start_idx` only ever advances -- once a turn ends at or before the
+    current span's start it can never overlap a later span either, so it is skipped for
+    good rather than rescanned on every call.
+    """
+    while start_idx < len(turns) and turns[start_idx].end <= start:
+        start_idx += 1
+
+    overlaps: dict[str, float] = {}
+    idx = start_idx
+    while idx < len(turns) and turns[idx].start < end:
+        turn = turns[idx]
+        overlap = min(turn.end, end) - max(turn.start, start)
+        if overlap > 0:
+            overlaps[turn.speaker] = overlaps.get(turn.speaker, 0.0) + overlap
+        idx += 1
+
+    if not overlaps:
+        return None, start_idx
+    return max(overlaps, key=overlaps.get), start_idx
+
+
+def _split_segment_by_speaker(
+    segment: Segment, turns: list[Turn], start_idx: int, next_id: int
+) -> tuple[list[Segment], int, int]:
+    """Split `segment` into one sub-segment per contiguous speaker run.
+
+    Uses word-level overlap against `turns` when `segment.words` is populated (true for
+    every local/openai segment now that both request word timestamps), which is what
+    makes splitting on speaker change expressible at all. A segment with no words is
+    left whole, labelled with its single majority speaker. Sub-segments -- and an
+    unsplit segment -- get a fresh id from `next_id`, since a split segment no longer
+    maps 1:1 onto the original ASR id.
+    """
+    if not segment.words:
+        speaker, start_idx = _speaker_for_span(turns, segment.start, segment.end, start_idx)
+        sub = Segment(
+            id=next_id,
+            start=segment.start,
+            end=segment.end,
+            text=segment.text,
+            words=segment.words,
+            speaker=speaker,
+        )
+        return [sub], start_idx, next_id + 1
+
+    word_speakers: list[str | None] = []
+    for word in segment.words:
+        speaker, start_idx = _speaker_for_span(turns, word.start, word.end, start_idx)
+        word_speakers.append(speaker)
+
+    runs: list[tuple[int, int]] = []
+    run_start = 0
+    for i in range(1, len(segment.words) + 1):
+        if i == len(segment.words) or word_speakers[i] != word_speakers[run_start]:
+            runs.append((run_start, i))
+            run_start = i
+
+    if len(runs) == 1:
+        # No speaker change inside this segment: keep the original span/text intact
+        # rather than reconstructing text from word tokens, which would risk drifting
+        # spacing/punctuation for no benefit.
+        sub = Segment(
+            id=next_id,
+            start=segment.start,
+            end=segment.end,
+            text=segment.text,
+            words=segment.words,
+            speaker=word_speakers[0],
+        )
+        return [sub], start_idx, next_id + 1
+
+    out: list[Segment] = []
+    for run_start_i, run_end_i in runs:
+        run_words = segment.words[run_start_i:run_end_i]
+        out.append(
+            Segment(
+                id=next_id,
+                start=run_words[0].start,
+                end=run_words[-1].end,
+                text=" ".join(w.text.strip() for w in run_words).strip(),
+                words=run_words,
+                speaker=word_speakers[run_start_i],
+            )
+        )
+        next_id += 1
+
+    return out, start_idx, next_id
+
+
+def _diarized_segments(segments: Iterable[Segment], turns: list[Turn]) -> Iterator[Segment]:
+    """Lazily label (and, on a speaker change, split) each segment as it is consumed.
+
+    Stays lazy -- pulls from `segments` one at a time and yields as it goes -- so the
+    caller's `for segment in tqdm(segments, ...)` loop still drives ASR inference and
+    the progress bar; nothing here materializes the underlying generator.
+    """
+    start_idx = 0
+    next_id = 0
+    for segment in segments:
+        subs, start_idx, next_id = _split_segment_by_speaker(segment, turns, start_idx, next_id)
+        yield from subs
 
 
 def _build_translation_provider(translation_engine: str, mt_model_name: str) -> TranslationProvider:
@@ -227,10 +357,50 @@ def create_subtitles(
         _check_ffmpeg_tools()
         tts = _build_tts_provider(resolved_tts_engine)
 
+    # Diarisation is a whole-file operation, so it runs once, up front, before the ASR
+    # generator is consumed -- not as a post-pass -- since its results must already be
+    # available while .srt cues are being emitted from the lazy ASR loop below.
+    needs_diarization = voice_match != "off" and resolved_asr_engine != "elevenlabs"
+    turns: list[Turn] = []
+    if needs_diarization:
+        diarizer: DiarizationProvider | None = None
+        try:
+            diarizer = _build_diarizer(resolved_asr_engine, voice_match)
+        except ImportError:
+            # pyannote.audio is a declared hard dependency, so an ImportError here (or
+            # from Diarize.__init__'s own lazy torch/pyannote imports) means a broken
+            # install, not a runtime failure -- fail the run rather than silently
+            # producing a worse dub. Mirrors separate.py's ImportError/Exception split.
+            raise
+        except Exception as exc:
+            logger.warning(
+                f"Could not build the speaker diarizer ({exc}); dubbing will use a single voice."
+            )
+
+        if diarizer is not None:
+            if resolved_asr_engine == "openai":
+                logger.warning(
+                    "Diarizing --asr-engine openai output: speaker labels are assigned "
+                    "by overlapping diarisation turns against whisper-1's ASR segment "
+                    "spans. whisper-1's segment timestamps are known to collapse to "
+                    "uniform 1.000s spans on music-heavy or dialogue-sparse audio, which "
+                    "would make those labels confidently wrong rather than merely "
+                    "absent. Prefer --asr-engine elevenlabs for multi-speaker material."
+                )
+            try:
+                turns = diarizer.diarize(fpath)
+            except ImportError:
+                raise
+            except Exception as exc:
+                logger.warning(f"Diarization failed ({exc}); dubbing will use a single voice.")
+                turns = []
+
     transcriber = _build_asr_provider(
         resolved_asr_engine, whisper_model_name, diarize=voice_match != "off"
     )
     segments = transcriber(fpath, audio_lang)
+    if needs_diarization:
+        segments = _diarized_segments(segments, turns)
 
     srt_lines = []
     dub_segments: list[Segment] = []
@@ -563,7 +733,9 @@ def main() -> None:
             "speaker's voice via ElevenLabs IVC, 'preset' matches each speaker to a "
             "curated stock voice by gender/age, and 'auto' clones when enough clean "
             "audio is available for a speaker and falls back to a preset otherwise. "
-            "Ignored when the ASR engine does not diarize. Defaults to 'auto'"
+            "On --asr-engine local/openai, any mode other than 'off' also runs a "
+            "standalone pyannote.audio diarisation pass to label speakers (ElevenLabs "
+            "diarizes natively). Defaults to 'auto'"
         ),
     )
     parser.add_argument(
