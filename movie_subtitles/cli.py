@@ -40,6 +40,13 @@ def _positive_float(value: str) -> float:
     return n
 
 
+def _unit_float(value: str) -> float:
+    n = float(value)
+    if not 0.0 <= n <= 1.0:
+        raise ArgumentTypeError(f"must be between 0.0 and 1.0 inclusive, got {n}")
+    return n
+
+
 # Assumption, not a measured value: rough average speaking rate used to derive a
 # character budget from a segment's duration. Tune this once real dubs are assessed.
 _CHARS_PER_SECOND = 15.0
@@ -137,6 +144,7 @@ def create_subtitles(
     clone_min_seconds: float = 30.0,
     clone_target_seconds: float = 60.0,
     voice_preset_table: str | Path | None = None,
+    duck_level: float = 0.25,
 ) -> None:
     if isinstance(fpath, str):
         fpath = Path(fpath)
@@ -274,6 +282,7 @@ def create_subtitles(
                 dub_workers=dub_workers,
                 dub_correction_passes=dub_correction_passes,
                 voices=voices_map,
+                duck_level=duck_level,
             )
 
 
@@ -344,6 +353,7 @@ def _dub_and_mux(
     tts: TTSProvider,
     dub_workers: int,
     dub_correction_passes: int,
+    duck_level: float,
     voices: dict[str | None, str | None] = _NO_VOICES,
 ) -> None:
     from movie_subtitles.dub import synthesise_track
@@ -352,7 +362,7 @@ def _dub_and_mux(
     audio_track = fpath.with_name(f"{fpath.stem}.dub_audio.mp3")
     aligner = _build_aligner()
 
-    synthesise_track(
+    _, speech_spans = synthesise_track(
         segments,
         translations,
         tts,
@@ -363,7 +373,7 @@ def _dub_and_mux(
         voices=voices,
     )
 
-    dubbed_path = mux_dub(fpath, audio_track)
+    dubbed_path = mux_dub(fpath, audio_track, speech_spans=speech_spans, duck_level=duck_level)
     logger.info(f"Saved dubbed video to {dubbed_path}")
 
     audio_track.unlink()
@@ -538,6 +548,17 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--duck-level",
+        type=_unit_float,
+        default=0.25,
+        help=(
+            "How much to attenuate the original audio while the dub is speaking, during "
+            "--dub muxing. 0.0 silences the original entirely under the dub; 1.0 disables "
+            "ducking altogether (original plays at full volume under the dub). Must be "
+            "between 0.0 and 1.0 inclusive. Defaults to 0.25"
+        ),
+    )
+    parser.add_argument(
         "--managed",
         action="store_true",
         help=(
@@ -568,6 +589,7 @@ def main() -> None:
             clone_min_seconds=args.clone_min_seconds,
             clone_target_seconds=args.clone_target_seconds,
             voice_preset_table=args.voice_preset_table,
+            duck_level=args.duck_level,
         )
     except (
         RuntimeError,
