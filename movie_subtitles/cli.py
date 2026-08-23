@@ -144,7 +144,8 @@ def create_subtitles(
     clone_min_seconds: float = 30.0,
     clone_target_seconds: float = 60.0,
     voice_preset_table: str | Path | None = None,
-    duck_level: float = 0.25,
+    duck_level: float | None = None,
+    separate_background: bool = False,
 ) -> None:
     if isinstance(fpath, str):
         fpath = Path(fpath)
@@ -179,6 +180,13 @@ def create_subtitles(
         raise ValueError(
             "--managed and --dub are mutually exclusive: --managed runs the ElevenLabs "
             "Dubbing job end to end instead of the local transcribe/translate/dub pipeline."
+        )
+
+    if managed and separate_background:
+        raise ValueError(
+            "--managed and --separate-background are mutually exclusive: the managed "
+            "ElevenLabs Dubbing job already handles background preservation itself, so "
+            "running source separation on top of it would be wasted work."
         )
 
     if not managed and translation_engine is None and engine == "elevenlabs":
@@ -283,6 +291,7 @@ def create_subtitles(
                 dub_correction_passes=dub_correction_passes,
                 voices=voices_map,
                 duck_level=duck_level,
+                separate_background=separate_background,
             )
 
 
@@ -353,8 +362,9 @@ def _dub_and_mux(
     tts: TTSProvider,
     dub_workers: int,
     dub_correction_passes: int,
-    duck_level: float,
+    duck_level: float | None,
     voices: dict[str | None, str | None] = _NO_VOICES,
+    separate_background: bool = False,
 ) -> None:
     from movie_subtitles.dub import synthesise_track
     from movie_subtitles.mux import mux_dub
@@ -373,10 +383,39 @@ def _dub_and_mux(
         voices=voices,
     )
 
-    dubbed_path = mux_dub(fpath, audio_track, speech_spans=speech_spans, duck_level=duck_level)
-    logger.info(f"Saved dubbed video to {dubbed_path}")
+    background_path: Path | None = None
+    accompaniment_path: Path | None = None
+    if separate_background:
+        accompaniment_path = fpath.with_name(f"{fpath.stem}.accompaniment.wav")
+        try:
+            from movie_subtitles.separate import Separate
 
-    audio_track.unlink()
+            separator = Separate()
+            background_path = separator(fpath, accompaniment_path)
+        except Exception as exc:
+            # Separation is a nice-to-have on top of the #22 duck-and-mix path, not a
+            # hard requirement of --dub: missing/unreachable model weights, a bad
+            # input file, or any apply_model/ffmpeg error must never fail the whole
+            # run. Falling back to ducking the original audio instead.
+            logger.warning(
+                f"Source separation failed ({exc}); falling back to ducking the "
+                "original audio instead of muxing over an accompaniment stem."
+            )
+            background_path = None
+
+    try:
+        dubbed_path = mux_dub(
+            fpath,
+            audio_track,
+            speech_spans=speech_spans,
+            duck_level=duck_level,
+            background_path=background_path,
+        )
+        logger.info(f"Saved dubbed video to {dubbed_path}")
+    finally:
+        audio_track.unlink()
+        if accompaniment_path is not None and accompaniment_path.exists():
+            accompaniment_path.unlink()
 
 
 def _load_env() -> None:
@@ -550,12 +589,32 @@ def main() -> None:
     parser.add_argument(
         "--duck-level",
         type=_unit_float,
-        default=0.25,
+        # None is a sentinel resolved by mux.mux_dub itself, not duplicated here as a
+        # literal default per the repo's usual convention: which of the two numbers
+        # applies depends on whether --separate-background succeeded, and argparse
+        # cannot know that at parse time. Do not "fix" this back to 0.25.
+        default=None,
         help=(
-            "How much to attenuate the original audio while the dub is speaking, during "
-            "--dub muxing. 0.0 silences the original entirely under the dub; 1.0 disables "
-            "ducking altogether (original plays at full volume under the dub). Must be "
-            "between 0.0 and 1.0 inclusive. Defaults to 0.25"
+            "How much to attenuate the original audio (or, with --separate-background, "
+            "the separated accompaniment stem) while the dub is speaking, during --dub "
+            "muxing. 0.0 silences that bed entirely under the dub; 1.0 disables ducking "
+            "altogether (bed plays at full volume under the dub). Must be between 0.0 "
+            "and 1.0 inclusive. Defaults to 0.25, or 0.6 when --separate-background "
+            "succeeded (the original dialogue is already gone, so only a little "
+            "headroom over loud music is needed); an explicit value always wins over "
+            "either default"
+        ),
+    )
+    parser.add_argument(
+        "--separate-background",
+        action="store_true",
+        help=(
+            "Split the source audio into vocals/accompaniment stems (via Demucs) and mux "
+            "the dub over the accompaniment stem only, removing the original dialogue "
+            "instead of merely ducking it. Opt-in: this is CPU-minutes-to-tens-of-minutes "
+            "on a feature-length film. Falls back to the default duck-and-mix path over "
+            "the original audio if separation fails for any reason. Mutually exclusive "
+            "with --managed"
         ),
     )
     parser.add_argument(
@@ -590,6 +649,7 @@ def main() -> None:
             clone_target_seconds=args.clone_target_seconds,
             voice_preset_table=args.voice_preset_table,
             duck_level=args.duck_level,
+            separate_background=args.separate_background,
         )
     except (
         RuntimeError,
