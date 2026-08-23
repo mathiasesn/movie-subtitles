@@ -10,6 +10,7 @@ from pathlib import Path
 from dotenv import find_dotenv, load_dotenv
 from tqdm.auto import tqdm
 
+from movie_subtitles.ffmpeg import run as run_ffmpeg
 from movie_subtitles.providers.base import (
     AlignmentProvider,
     ASRProvider,
@@ -93,19 +94,17 @@ def _build_asr_provider(
         raise ValueError(f"Unknown ASR engine: {asr_engine}")
 
 
-def _build_diarizer(asr_engine: str, voice_match: str) -> DiarizationProvider | None:
-    """Build the pyannote.audio diarizer, or None when diarisation isn't needed.
+def _build_diarizer() -> DiarizationProvider:
+    """Build the pyannote.audio diarizer.
 
-    Returns None when the resolved ASR engine already diarizes natively (elevenlabs,
-    via Scribe's diarize=True, see _build_asr_provider) or when --voice-match off asks
-    for today's single-voice behaviour. The pyannote.audio (and therefore torch) import
-    happens only inside this branch, so a run that doesn't need diarisation never pays
-    that import cost -- mirroring the lazy-import convention the other builders and
+    Callers only reach this when diarisation is actually needed (see
+    `create_subtitles`'s `needs_diarization` guard -- the resolved ASR engine doesn't
+    already diarize natively and --voice-match isn't "off"); this builder no longer
+    re-tests that condition. The pyannote.audio (and therefore torch) import happens
+    only inside this call, so a run that doesn't need diarisation never pays that
+    import cost -- mirroring the lazy-import convention the other builders and
     separate.py already follow.
     """
-    if voice_match == "off" or asr_engine == "elevenlabs":
-        return None
-
     from movie_subtitles.providers.pyannote_ import Diarize
 
     return Diarize()
@@ -166,6 +165,30 @@ def _split_segment_by_speaker(
     for word in segment.words:
         speaker, start_idx = _speaker_for_span(turns, word.start, word.end, start_idx)
         word_speakers.append(speaker)
+
+    # A word that overlaps no diarisation turn (a silence gap, or a diarizer miss)
+    # comes back as None from _speaker_for_span above. Left as-is, a single such word
+    # in the middle of a sentence would form its own one-word run and fragment one cue
+    # into three. Smooth it to a neighbouring label instead -- previous labelled word
+    # first, else next labelled word -- so it merges into an adjacent run rather than
+    # splitting one. If nothing in the segment got a label at all, leave every word
+    # None: that's the genuine "diarisation found nothing here" case and must stay
+    # distinguishable from a smoothed gap.
+    if any(speaker is not None for speaker in word_speakers):
+        smoothed: list[str | None] = list(word_speakers)
+        last_label: str | None = None
+        for i, speaker in enumerate(smoothed):
+            if speaker is None:
+                smoothed[i] = last_label
+            else:
+                last_label = speaker
+        next_label: str | None = None
+        for i in range(len(smoothed) - 1, -1, -1):
+            if smoothed[i] is not None:
+                next_label = smoothed[i]
+            elif next_label is not None:
+                smoothed[i] = next_label
+        word_speakers = smoothed
 
     runs: list[tuple[int, int]] = []
     run_start = 0
@@ -371,7 +394,7 @@ def create_subtitles(
     if needs_diarization:
         diarizer: DiarizationProvider | None = None
         try:
-            diarizer = _build_diarizer(resolved_asr_engine, voice_match)
+            diarizer = _build_diarizer()
         except ImportError:
             # pyannote.audio is a declared hard dependency, so an ImportError here (or
             # from Diarize.__init__'s own lazy torch/pyannote imports) means a broken
@@ -394,7 +417,32 @@ def create_subtitles(
                     "absent. Prefer --asr-engine elevenlabs for multi-speaker material."
                 )
             try:
-                turns = diarizer.diarize(fpath)
+                # pyannote.audio's loader is torchaudio/torchcodec-based and may not be
+                # able to decode a video container the way demucs's ffmpeg-backed
+                # Separator can -- so extract a small mono 16 kHz wav with ffmpeg first
+                # and hand pyannote that instead of the source media directly. This
+                # extraction sits inside the same try/except as diarize() itself so an
+                # extraction failure degrades exactly like any other diarisation
+                # failure (warn and fall back to a single voice) rather than aborting
+                # the run.
+                with tempfile.TemporaryDirectory(prefix="movie-subtitles-diarize-") as tmp_dir:
+                    audio_path = Path(tmp_dir) / f"{fpath.stem}.diarize.wav"
+                    run_ffmpeg(
+                        [
+                            "ffmpeg",
+                            "-y",
+                            "-i",
+                            str(fpath),
+                            "-vn",
+                            "-ac",
+                            "1",
+                            "-ar",
+                            "16000",
+                            str(audio_path),
+                        ],
+                        what=f"Extracting audio from {fpath.name} for diarisation",
+                    )
+                    turns = diarizer.diarize(audio_path)
             except ImportError:
                 raise
             except Exception as exc:

@@ -10,10 +10,11 @@ Named `pyannote_.py`, trailing underscore, matching `providers/openai_.py`'s con
 without it the module would shadow the installed `pyannote` package on `sys.path` and
 break its own imports.
 
-Every `pyannote.audio`/`torch` import is lazy -- inside `Diarize.__init__` and
-`Diarize.diarize` -- per this repo's convention (see `separate.py`'s lazy `demucs`/`torch`
-imports): a run that never diarizes (`--voice-match off`, or `--asr-engine elevenlabs`,
-which diarizes natively via Scribe) must not pay this import cost.
+Every `pyannote.audio`/`torch` import is lazy -- inside `Diarize.__init__`, the only
+place they're imported -- per this repo's convention (see `separate.py`'s lazy
+`demucs`/`torch` imports): a run that never diarizes (`--voice-match off`, or
+`--asr-engine elevenlabs`, which diarizes natively via Scribe) must not pay this import
+cost.
 
 `pyannote/speaker-diarization-community-1` is a gated model: first use requires a Hugging
 Face account, accepting the model's conditions on its model page, and a token supplied at
