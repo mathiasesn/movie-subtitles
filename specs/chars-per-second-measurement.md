@@ -1,7 +1,7 @@
 # Chars-per-second measurement (issue #6)
 
 Record of the measurement that replaced `_CHARS_PER_SECOND = 15.0` (an unmeasured
-assumption) with `cli.py`'s `_EXPANSION_RATIO` table and `_MAX_SPEAKABLE_CPS`. See
+assumption) with `cli.py`'s `_EXPANSION_RATIO` table and `_TARGET_SPEAKABLE_CPS`. See
 `specs/measure-chars-per-second-budget.md` for the plan this executed.
 
 ## Sample
@@ -66,41 +66,92 @@ shortfall in the budget, not a speaking-rate problem the clamp could absorb.
 
 ## What this does and does not fix
 
-Both constants are now measured rather than assumed, which is what issue #6 asked
-for — but the fix should not be read as closing the observed 0.56–0.63x clip-length
-shortfall, because it largely does not.
+`_budget_chars` no longer treats the expansion-ratio term as primary and the
+duration term as a cap on it. Both terms are independently measured lower
+bounds on how much room a cue needs — the ratio term from source-text
+expansion, the duration term from how many characters the slot can speak at
+the measured target rate — and `_budget_chars` now takes `max()` of the two,
+not `min()`. Both constants are still measured rather than assumed, which is
+what issue #6 asked for, but the fix should not be read as closing the
+observed clip-length shortfall, because it does not — it substantially
+narrows it (see Verification below) while leaving a structural shortfall in
+place for at least one group.
 
-The old budget was `15.0 * duration`. At the measured source rate of 15.99
-chars/slot-second, that is `duration ≈ src_chars / 15.99`, so the old budget was
-approximately `15.0 * src_chars / 15.99 ≈ 0.94 * src_chars`. The new primary term is
-`1.036 * src_chars` — about a **10% budget increase** against a shortfall that was
-running **~40%** (translations landing at 0.78–0.81x source character count,
-clips at 0.56–0.63x source speech duration).
+Switching from `min()` to `max()` raised the budget on every one of the 68
+logged segments in the offline recompute (see Verification): median budgeted
+rate moved from 15.99 to 19.65 chars/slot-second, a **median budget increase
+of +26.0%**. That "raised on 100% of segments" figure is true by
+construction — `max()` is never below `min()`, and the two terms are (in this
+sample) never exactly equal — so it carries no evidential weight on its own;
+the median increase is the number that matters.
 
-Worse, even a translation that lands exactly on the new 1.036 budget does not
-fill its slot. Spoken by tts-1 at the measured median rate of 19.822 Danish
-chars/second, `1.036 * src_chars` characters take `1.036 * src_chars / 19.822`
-seconds — against a slot of `src_chars / 15.99` seconds. The ratio of the two is
-`(1.036 / 19.822) / (1 / 15.99) ≈ 0.836`: **about 84% of the slot even in the
-ideal case**, before any translator under- or over-shoot. The residual gap is not
-a budgeting error — it is that tts-1 simply speaks Danish faster than this
-trailer's English actors deliver their lines, and no character-budget derivation
-can correct a speaking-rate mismatch between two different voices in two
-different languages. The `[0.9, 1.15]` `_MIN_RATE`/`_MAX_RATE` clamp in `dub.py`
-cannot absorb an 84%-of-slot ideal case either: slowing tts-1 to `0.9x` narrows,
-but does not close, that gap, and clamping further would trade one problem
-(clips too short) for another (audibly slow speech).
+Even with the larger budget, a translation landing on it does not fill the
+slot when spoken by tts-1: the paid verification run below found the median
+translated/source character ratio rose from 0.854 to 0.935 and median clip
+duration against source speech at 1.0x rose from 0.629 to 0.764 — real,
+substantial improvement, but still short of 1.0. Part of the remaining gap is
+that budget fill (how much of the larger budget the translator actually used)
+*dropped*, from 87% to 74% — the translator is not consuming all the new
+headroom. The rest is that tts-1 simply speaks Danish faster than this
+sample's English actors deliver their lines, which no budget-derivation change
+can fix; the `[0.9, 1.15]` `_MIN_RATE`/`_MAX_RATE` clamp in `dub.py` remains
+the last line of defense and still saturates on the worst group.
 
-None of this means the change was wasted: a confirmed post-fix verification run
-on the 45s clip showed real, if partial, improvement — group 0's drift went from
--7.19s to -5.81s, group 1's from -2.82s to -2.69s, and a third group that had
-been out of tolerance came back within it. The gap narrowed; it did not close.
+Per-group drift in the paid verification: groups within tolerance went from 1
+of 3 to 2 of 3. Group 1 fully resolved (from a clamp-saturated -2.69s final
+drift to +0.33s, within tolerance, left at 1.0x). Group 0 improved (-5.81s
+final drift under the old `min()` derivation to -5.24s under the new `max()`
+derivation) but is **still clamp-saturated and still a structural shortfall,
+not a speaking-rate problem** the clamp can absorb — the gap narrowed, it did
+not close. Group 2 was already in tolerance and stayed there.
 
-The honest follow-up is a further increase to `_EXPANSION_RATIO["da"]` (and/or a
-translator-side steer toward denser phrasing) informed by the 84%-of-slot ceiling
-above, not another turn of the rate clamp — `_MIN_RATE = 0.9` is already too
-close to 1.0 to meaningfully slow tts-1's Danish output into this trailer's
-English pacing.
+The honest follow-up is a further increase to `_EXPANSION_RATIO["da"]` and/or
+`_TARGET_SPEAKABLE_CPS` (and/or a translator-side steer toward denser
+phrasing, given budget fill fell rather than rose), informed by Group 0's
+continued clamp saturation, not another turn of the rate clamp — `_MIN_RATE =
+0.9` is already too close to 1.0 to meaningfully slow tts-1's Danish output
+into this sample's English pacing.
+
+## Verification
+
+Two steps verified the `min()` -> `max()` change, one free and one paid.
+
+**Step 1 — free offline recompute.** The 68 logged segments' already-captured
+source chars, slot durations, and the constants above were recomputed with the
+new `max()` formula, entirely offline (no API calls, no spend). Median
+budgeted rate moved from 15.99 to 19.65 chars/slot-second (+26.0% median
+increase), and segments budgeted at or above the 15.99 chars/slot-second
+source speaking rate moved from 34/68 to 68/68. As noted above, that
+"100% raised" figure follows automatically from `max()` never being below
+`min()`; the median increase is the figure with evidential weight. This
+recompute was the spend gate for step 2: only after it confirmed the formula
+behaves as intended did the paid run proceed.
+
+**Step 2 — paid instrumented `--dub` run.** A real run over
+`data/paw-patrol-the-dino-movie-clip.webm` (en -> da, `--asr-engine
+elevenlabs`, `--translation-engine anthropic`, `--tts-engine openai`,
+`--voice-match off`) was compared against the recorded post-#30 baseline:
+
+| metric | baseline `min()` | new `max()` |
+| --- | --- | --- |
+| median budget (chars) | 23 | 32 |
+| median translated chars | 18 | 22 |
+| median translated/source char ratio | 0.854 | 0.935 |
+| median clip duration / source speech at 1.0x | 0.629 | 0.764 |
+| median % of budget the translator actually used | 87% | 74% |
+
+**Caveat 1 — the comparison is not a controlled A/B.** The ElevenLabs ASR
+re-run produced a different segmentation than the baseline run: 18 comparable
+translate records versus the baseline's 20, and Group 1 had 6 segments in this
+run versus 7 in the baseline. Group boundaries and counts therefore differ
+between the two runs, so the per-group drift figures above are indicative, not
+a controlled A/B.
+
+**Caveat 2 — budget fill dropped.** Median budget fill fell from 87% to 74%:
+the translator does not consume all the new headroom the larger budget makes
+available, so the remaining shortfall is not purely a budgeting problem — part
+of it is that tts-1 speaks Danish faster than the source actors deliver their
+lines, which no budget change can fix.
 
 ## Derived constants
 
@@ -109,15 +160,22 @@ _EXPANSION_RATIO: dict[str, float] = {
     "da": 1.036,
     "default": 1.1,
 }
-_MAX_SPEAKABLE_CPS = 19.822
+_TARGET_SPEAKABLE_CPS = 19.822
 ```
 
 `_budget_chars(start, end, text, output_lang)` returns
-`max(int(min(len(text) * ratio, duration * _MAX_SPEAKABLE_CPS)), 1)` — the ratio
-against source text length is the primary term; the duration-derived cap only
-guards a cue whose source text already overruns its own span. Measured across the
-69 pooled segments, the duration cap binds on **13 of 68** segments (19%) — the
-ratio, not the cap, drives the budget in the large majority of cases.
+`max(int(max(len(text) * ratio, duration * _TARGET_SPEAKABLE_CPS)), 1)` — the
+expansion-ratio term and the duration-derived term are both independently
+measured floors, and the larger one wins; neither is primary and neither caps
+the other. Measured across the 68 pooled segments used for the offline
+recompute, the duration-derived floor is the larger (binding) term on **55 of
+68** segments (81%) — so under `max()` it is the duration term that drives the
+budget in the large majority of cases, and the expansion-ratio term binds on
+the remaining 13. This is the exact inverse of the old `min()` derivation,
+where the duration term bound on only those same 13 segments (19%) as a cap.
+That inversion is the change: the term that governs whether a cue can fill its
+slot went from being the rarely-active ceiling to being the usually-active
+floor.
 
 ## Status: provisional
 
@@ -145,8 +203,11 @@ MOVIE_SUBTITLES_LOG_LEVEL=DEBUG uv run movie-subtitles \
   from the ~3-minute trailer run (translate + synth measurements).
 - `data/measurements/verify-clip.measure.log` -- 57 `[measure]` lines from the
   verification run over the clip, re-checking the derived constants above.
+- `data/measurements/step2-max-budget.measure.log` -- 50 `[measure]` lines from
+  the step 2 paid verification run under the new `max()` derivation, the source
+  of the Verification table above.
 - `data/measurements/measure.py` -- the script used to parse the three logs above
-  and compute the medians (source chars/slot-second, tts-1 Danish chars/sec,
+  and compute the medians over the first three logs (source chars/slot-second, tts-1 Danish chars/sec,
   unconstrained en->da expansion ratio) cited in this document.
 
 These are the filtered `[measure]` DEBUG lines emitted by `cli.py`/`dub.py`
