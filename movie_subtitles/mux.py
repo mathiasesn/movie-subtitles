@@ -7,10 +7,12 @@ from movie_subtitles.ffmpeg import run as run_ffmpeg
 
 logger = logging.getLogger("mux")
 
-# Default for `mux_dub(duck_level=...)`, overridable per run via `--duck-level` -- unlike
-# `_MIX_INPUT_GAIN` below, this one is a tunable. 0.25 keeps the original's
-# music/effects/ambience audible underneath without competing with the translated
-# dialogue.
+# One of two outcomes `mux_dub` resolves its `duck_level=None` sentinel to when the
+# caller doesn't pass an explicit value: the plain duck-and-mix default, used when
+# `background_path` is not given -- unlike `_MIX_INPUT_GAIN` below, this one is a
+# tunable. 0.25 keeps the original's music/effects/ambience audible underneath without
+# competing with the translated dialogue. See `_SEPARATED_DUCK_LEVEL` just below for the
+# other outcome.
 _DUCK_LEVEL = 0.25
 
 # Default for `mux_dub(duck_level=...)` when `background_path` is given, i.e. the bed is
@@ -168,12 +170,11 @@ def mux_dub(
         elif background_path is not None:
             resolved_duck_level = _SEPARATED_DUCK_LEVEL
             logger.info(
-                f"No --duck-level given; using the separated-background default "
-                f"{_SEPARATED_DUCK_LEVEL} since background_path was supplied."
+                f"Ducking the separated background bed at the gentler {_SEPARATED_DUCK_LEVEL} "
+                "since the original dialogue was already removed by separation."
             )
         else:
             resolved_duck_level = _DUCK_LEVEL
-            logger.info(f"No --duck-level given; using the default {_DUCK_LEVEL}.")
 
         if background_path is not None:
             base_cmd = base_cmd + ["-i", str(background_path)]

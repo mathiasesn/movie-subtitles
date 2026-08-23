@@ -387,9 +387,15 @@ def _dub_and_mux(
     accompaniment_path: Path | None = None
     if separate_background:
         accompaniment_path = fpath.with_name(f"{fpath.stem}.accompaniment.wav")
-        try:
-            from movie_subtitles.separate import Separate
+        # Imported outside the guarded try below: demucs/torchaudio are declared hard
+        # dependencies (see separate.py's module docstring), so an ImportError here
+        # means the install is broken, not that separation merely failed at runtime.
+        # That must propagate and fail the run, not be swallowed into a WARNING and a
+        # silent fallback -- only a genuine runtime failure (unreachable weights, a bad
+        # input file, an apply_model/ffmpeg error) degrades gracefully.
+        from movie_subtitles.separate import Separate
 
+        try:
             separator = Separate()
             background_path = separator(fpath, accompaniment_path)
         except Exception as exc:
