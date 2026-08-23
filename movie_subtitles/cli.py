@@ -72,10 +72,10 @@ _EXPANSION_RATIO: dict[str, float] = {
 
 # Measured median tts-1 (OpenAI TTS) Danish chars/second at rate 1.0, from the same
 # sample and run as _EXPANSION_RATIO above (69 synth pass=0 rate=1.0 measurements).
-# This is the upper bound on how fast the target language can plausibly be spoken --
-# used only as a cap guarding a cue whose source text already overruns its own span,
-# not as the primary budgeting term. Also PROVISIONAL, same caveat as above.
-_MAX_SPEAKABLE_CPS = 19.822
+# This is a FLOOR: the number of characters of synthesised speech that the slot can
+# actually hold at the measured target-language rate, so a sparse source cue is not
+# budgeted below what its slot can carry. Also PROVISIONAL, same caveat as above.
+_TARGET_SPEAKABLE_CPS = 19.822
 
 # Shared empty default for the `voices` kwarg -- a mutable literal default is a bugbear
 # violation (B006), so this module-level constant stands in for it; never mutated.
@@ -113,21 +113,28 @@ def _warns_degenerate(segment_count: int, near_fixed_cadence: int) -> bool:
 def _budget_chars(start: float, end: float, text: str, output_lang: str) -> int:
     """Derive a translation length budget (in characters) from source text and slot.
 
-    The measured per-target-language expansion ratio (`_EXPANSION_RATIO`) is the
-    primary term: it estimates how long the translation will naturally run given the
-    source text length. The duration term is only an upper CAP -- it guards the case
-    where the source cue's text already overruns its own time span (loose ASR
-    segmentation), rather than driving the budget itself. The cap uses the measured
-    *median* tts-1 Danish speaking rate, not an observed maximum: a slot of D
-    seconds physically fits `_MAX_SPEAKABLE_CPS * D` characters of synthesised
-    speech at that rate, so this is a fit cap against the TTS engine, not a source-
-    text plausibility bound. See specs/chars-per-second-measurement.md.
+    The budget is the LARGER of two independently measured lower bounds, not a
+    primary term plus a cap: the expansion-ratio term (`_EXPANSION_RATIO`) estimates
+    how long the translation will naturally run given the source text length, and the
+    slot-capacity term estimates how many characters the cue's own time span can hold
+    at the measured target-language speaking rate (`_TARGET_SPEAKABLE_CPS * duration`).
+    Taking the min() of these (the old behaviour) starved cues whose source text was
+    sparse relative to a generous slot: measured over 68 real segments, it budgeted
+    half of them below the rate the source actors themselves speak at. Taking the
+    max() instead ensures a sparse source cue is still budgeted up to what its slot
+    can carry, not just what the ratio predicts.
+
+    Known trade-off: `_TARGET_SPEAKABLE_CPS` is a MEDIAN, not a maximum, so used as a
+    floor it will overshoot the slot for roughly half of segments by construction --
+    if the translator actually fills the larger budget, the failure mode can flip
+    from underrun (translation too short/rushed) to overrun (translation doesn't fit
+    its slot). See specs/chars-per-second-measurement.md.
     """
     duration = max(end - start, 0.0)
     ratio = _EXPANSION_RATIO.get(output_lang, _EXPANSION_RATIO["default"])
     expected = len(text) * ratio
-    fits_in_slot = duration * _MAX_SPEAKABLE_CPS
-    return max(int(min(expected, fits_in_slot)), 1)
+    slot_capacity = duration * _TARGET_SPEAKABLE_CPS
+    return max(int(max(expected, slot_capacity)), 1)
 
 
 def _build_asr_provider(

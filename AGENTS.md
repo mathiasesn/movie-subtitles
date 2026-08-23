@@ -26,9 +26,9 @@ movie_subtitles/
                     # _load_env() so the variable works from .env. Unset or unrecognised
                     # falls back to INFO
   cli.py           # argparse entry point + create_subtitles() orchestration, engine
-                    # selection, translation-length-budget derivation (source-text expansion ratio,
-                    # duration only as an upper cap -- see specs/chars-per-second-measurement.md),
-                    # top-level error handling.
+                    # selection, translation-length-budget derivation (larger of source-text
+                    # expansion ratio and duration-derived slot capacity -- see
+                    # specs/chars-per-second-measurement.md), top-level error handling.
                     # Diarisation is orchestration only here now: the needs_diarization
                     # guard is the only place deciding whether diarisation runs at all,
                     # and _diarize_or_warn(fpath, asr_engine) is the single try/except
