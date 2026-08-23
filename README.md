@@ -232,8 +232,12 @@ multiple speakers, because a cue is flushed as soon as the diarized speaker chan
 `--asr-engine local`/`openai` now split the same way whenever `--voice-match != off`
 (the diarisation pass above populates `speaker`, and both engines now also request
 word-level timestamps, which is what makes splitting on a mid-cue speaker change
-possible at all). `--voice-match off` reproduces the old unsplit, single-voice output
-on every engine, byte-for-byte.
+possible at all). `--voice-match off` still runs no diarisation and splits no cue on speaker change,
+on every engine, so cue count and cue text are unchanged. Cue *timings* aren't
+guaranteed byte-for-byte on `--asr-engine local`, though: that engine now requests
+word-level timestamps unconditionally (see below), which turns on faster-whisper's
+word-alignment pass and can shift a segment's own start/end slightly even with
+`--voice-match off`.
 
 **Diarising `local`/`openai` audio also shifts dub timing slightly**, independent of
 `--voice-match`'s value: both engines now request word timestamps unconditionally (not
