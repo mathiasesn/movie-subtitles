@@ -39,3 +39,16 @@ class AlignmentProvider(Protocol):
     def __call__(self, clip: Path, text: str) -> tuple[float, float]: ...
 
     def align(self, clip: Path, text: str) -> tuple[float, float]: ...
+
+
+@dataclass(frozen=True)
+class Turn:
+    start: float
+    end: float
+    speaker: str
+
+
+class DiarizationProvider(Protocol):
+    def __call__(self, fpath: str | Path) -> list[Turn]: ...
+
+    def diarize(self, fpath: str | Path) -> list[Turn]: ...

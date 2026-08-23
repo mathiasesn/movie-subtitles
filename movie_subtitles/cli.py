@@ -9,12 +9,15 @@ from pathlib import Path
 from dotenv import find_dotenv, load_dotenv
 from tqdm.auto import tqdm
 
+from movie_subtitles.diarize import label_segments
+from movie_subtitles.ffmpeg import extract_mono_wav
 from movie_subtitles.providers.base import (
     AlignmentProvider,
     ASRProvider,
     Segment,
     TranslationProvider,
     TTSProvider,
+    Turn,
 )
 from movie_subtitles.srt import format_block, pad_cue_end
 from movie_subtitles.voices import (
@@ -116,6 +119,56 @@ def _build_asr_provider(
         return OpenAITranscribe()
     else:
         raise ValueError(f"Unknown ASR engine: {asr_engine}")
+
+
+def _diarize_or_warn(fpath: Path, asr_engine: str) -> list[Turn]:
+    """Build the diarizer, extract a mono wav, and diarize -- or degrade to `[]`.
+
+    Callers only reach this when diarisation is actually needed (see
+    `create_subtitles`'s `needs_diarization` guard -- the resolved ASR engine doesn't
+    already diarize natively and --voice-match isn't "off"). Build, extraction, and
+    `diarize()` all run under one try, mirroring `_dub_and_mux`'s handling of
+    separate.py failures: an `ImportError` (a broken install -- pyannote.audio is a
+    declared hard dependency) propagates uncaught, while any other failure (a missing
+    HF_TOKEN, a decode/inference error, ...) is logged as one WARNING and degrades the
+    run to a single voice (every segment's speaker stays None) rather than aborting it.
+
+    The pyannote.audio (and therefore torch) import happens only inside this call, so
+    a run that doesn't need diarisation never pays that import cost -- mirroring the
+    lazy-import convention the other builders and separate.py already follow.
+    """
+    try:
+        from movie_subtitles.providers.pyannote_ import Diarize
+
+        diarizer = Diarize()
+
+        if asr_engine == "openai":
+            logger.warning(
+                "Diarizing --asr-engine openai output: speaker labels are assigned "
+                "by overlapping diarisation turns against whisper-1's ASR segment "
+                "spans. whisper-1's segment timestamps are known to collapse to "
+                "uniform 1.000s spans on music-heavy or dialogue-sparse audio, which "
+                "would make those labels confidently wrong rather than merely "
+                "absent. Prefer --asr-engine elevenlabs for multi-speaker material."
+            )
+
+        # pyannote.audio's loader is torchaudio/torchcodec-based and may not be able
+        # to decode a video container the way demucs's ffmpeg-backed Separator can --
+        # so extract a small mono 16 kHz wav with ffmpeg first and hand pyannote that
+        # instead of the source media directly.
+        with tempfile.TemporaryDirectory(prefix="movie-subtitles-diarize-") as tmp_dir:
+            audio_path = Path(tmp_dir) / f"{fpath.stem}.diarize.wav"
+            extract_mono_wav(fpath, audio_path)
+            return diarizer.diarize(audio_path)
+    except ImportError:
+        # pyannote.audio is a declared hard dependency, so an ImportError here (or
+        # from Diarize.__init__'s own lazy torch/pyannote imports) means a broken
+        # install, not a runtime failure -- fail the run rather than silently
+        # producing a worse dub. Mirrors separate.py's ImportError/Exception split.
+        raise
+    except Exception as exc:
+        logger.warning(f"Diarization failed ({exc}); dubbing will use a single voice.")
+        return []
 
 
 def _build_translation_provider(translation_engine: str, mt_model_name: str) -> TranslationProvider:
@@ -255,10 +308,18 @@ def create_subtitles(
         _check_ffmpeg_tools()
         tts = _build_tts_provider(resolved_tts_engine)
 
+    # Diarisation is a whole-file operation, so it runs once, up front, before the ASR
+    # generator is consumed -- not as a post-pass -- since its results must already be
+    # available while .srt cues are being emitted from the lazy ASR loop below.
+    needs_diarization = voice_match != "off" and resolved_asr_engine != "elevenlabs"
+    turns = _diarize_or_warn(fpath, resolved_asr_engine) if needs_diarization else []
+
     transcriber = _build_asr_provider(
         resolved_asr_engine, whisper_model_name, diarize=voice_match != "off"
     )
     segments = transcriber(fpath, audio_lang)
+    if turns:
+        segments = label_segments(segments, turns)
 
     srt_lines = []
     dub_segments: list[Segment] = []
@@ -613,7 +674,9 @@ def main() -> None:
             "speaker's voice via ElevenLabs IVC, 'preset' matches each speaker to a "
             "curated stock voice by gender/age, and 'auto' clones when enough clean "
             "audio is available for a speaker and falls back to a preset otherwise. "
-            "Ignored when the ASR engine does not diarize. Defaults to 'auto'"
+            "On --asr-engine local/openai, any mode other than 'off' also runs a "
+            "standalone pyannote.audio diarisation pass to label speakers (ElevenLabs "
+            "diarizes natively). Defaults to 'auto'"
         ),
     )
     parser.add_argument(
