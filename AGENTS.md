@@ -16,7 +16,9 @@ Note: the original README advertised burned-in per-frame subtitles. That was nev
 
 ```
 movie_subtitles/
-  __init__.py      # side-effecting: configures stdout INFO logging on import
+  __init__.py      # side-effecting: configures stdout logging on import, level from
+                    # MOVIE_SUBTITLES_LOG_LEVEL (default INFO; falls back to INFO on an
+                    # unset or unrecognised value)
   cli.py           # argparse entry point + create_subtitles() orchestration, engine
                     # selection, translation-length-budget derivation (source-text expansion ratio,
                     # duration only as an upper cap -- see specs/chars-per-second-measurement.md),

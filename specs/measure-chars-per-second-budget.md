@@ -92,7 +92,11 @@ translation), fit the value, and land it with the docs.
    duration term survives only as an **upper cap**, guarding the case where ASR
    hands back a cue whose source text already overruns its own span. Both the
    ratio and `max_speakable_cps` come from the same run -- `max_speakable_cps` is
-   the observed upper end of source chars per slot-second, not a reused 15.0.
+   the measured median TTS output chars-per-second (not a reused 15.0, and not an
+  observed upper end of *source* chars/second): a slot of `D` seconds physically
+  fits `max_speakable_cps * D` characters of synthesised speech at that rate, so
+  this is a fit cap against the TTS engine's own delivery speed, not a
+  plausibility bound on the source text.
 5. Land it with the sample named in the comment, and update `ARCHI.md`,
    `AGENTS.md` and the README, all of which currently describe a single global
    duration-derived constant.

@@ -51,7 +51,7 @@ def _unit_float(value: str) -> float:
     return n
 
 
-# Measured, not assumed -- see specs/measure-chars-per-second-budget.md. Sample:
+# Measured, not assumed -- see specs/chars-per-second-measurement.md. Sample:
 # data/paw-patrol-the-dino-movie-clip.webm (45s) + data/paw-patrol-the-dino-movie.webm
 # (137s), en -> da, --asr-engine elevenlabs, --translation-engine anthropic,
 # --tts-engine openai (tts-1), --voice-match off; 17 + 52 = 69 translated segments.
@@ -116,8 +116,11 @@ def _budget_chars(start: float, end: float, text: str, output_lang: str) -> int:
     primary term: it estimates how long the translation will naturally run given the
     source text length. The duration term is only an upper CAP -- it guards the case
     where the source cue's text already overruns its own time span (loose ASR
-    segmentation), rather than driving the budget itself; see
-    specs/measure-chars-per-second-budget.md.
+    segmentation), rather than driving the budget itself. The cap uses the measured
+    *median* tts-1 Danish speaking rate, not an observed maximum: a slot of D
+    seconds physically fits `_MAX_SPEAKABLE_CPS * D` characters of synthesised
+    speech at that rate, so this is a fit cap against the TTS engine, not a source-
+    text plausibility bound. See specs/chars-per-second-measurement.md.
     """
     duration = max(end - start, 0.0)
     ratio = _EXPANSION_RATIO.get(output_lang, _EXPANSION_RATIO["default"])

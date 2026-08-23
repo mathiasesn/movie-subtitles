@@ -3,7 +3,7 @@ import os
 import sys
 
 # MOVIE_SUBTITLES_LOG_LEVEL: no CLI flag by design -- measurement runs (see
-# specs/measure-chars-per-second-budget.md) need the per-segment DEBUG lines cli.py
+# specs/chars-per-second-measurement.md) need the per-segment DEBUG lines cli.py
 # and dub.py emit, without every invocation growing a --log-level flag. An unset or
 # unrecognised value falls back to INFO rather than crashing.
 _LEVEL_NAME = os.environ.get("MOVIE_SUBTITLES_LOG_LEVEL", "INFO").upper()
