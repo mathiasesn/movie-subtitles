@@ -51,9 +51,30 @@ def _unit_float(value: str) -> float:
     return n
 
 
-# Assumption, not a measured value: rough average speaking rate used to derive a
-# character budget from a segment's duration. Tune this once real dubs are assessed.
-_CHARS_PER_SECOND = 15.0
+# Measured, not assumed -- see specs/measure-chars-per-second-budget.md. Sample:
+# data/paw-patrol-the-dino-movie-clip.webm (45s) + data/paw-patrol-the-dino-movie.webm
+# (137s), en -> da, --asr-engine elevenlabs, --translation-engine anthropic,
+# --tts-engine openai (tts-1), --voice-match off; 17 + 52 = 69 translated segments.
+# `_EXPANSION_RATIO["da"]` is the median unconstrained (budget_chars=None)
+# tgt_chars/src_chars ratio over 16 segments re-translated from ElevenLabs-recovered
+# English source text for the 45s clip (the 137s trailer's own translate lines were
+# produced under the old 15.0-derived budget and are therefore compressed toward it,
+# so they could not be used to fit an unconstrained ratio). `default` is a
+# conservative >1.0 placeholder for any other target language, since en -> da is
+# known to expand and no other pair has been measured.
+# PROVISIONAL: the sample is ~3 minutes of short-utterance, music-heavy animated
+# trailer, not feature-length dialogue -- re-fit when such material is available.
+_EXPANSION_RATIO: dict[str, float] = {
+    "da": 1.036,
+    "default": 1.1,
+}
+
+# Measured median tts-1 (OpenAI TTS) Danish chars/second at rate 1.0, from the same
+# sample and run as _EXPANSION_RATIO above (69 synth pass=0 rate=1.0 measurements).
+# This is the upper bound on how fast the target language can plausibly be spoken --
+# used only as a cap guarding a cue whose source text already overruns its own span,
+# not as the primary budgeting term. Also PROVISIONAL, same caveat as above.
+_MAX_SPEAKABLE_CPS = 19.822
 
 # Shared empty default for the `voices` kwarg -- a mutable literal default is a bugbear
 # violation (B006), so this module-level constant stands in for it; never mutated.
@@ -88,10 +109,19 @@ def _warns_degenerate(segment_count: int, near_fixed_cadence: int) -> bool:
     )
 
 
-def _budget_chars(start: float, end: float) -> int:
-    """Derive a translation length budget (in characters) from a segment's duration."""
+def _budget_chars(start: float, end: float, text: str, output_lang: str) -> int:
+    """Derive a translation length budget (in characters) from source text and slot.
+
+    The measured per-target-language expansion ratio (`_EXPANSION_RATIO`) is the
+    primary term: it estimates how long the translation will naturally run given the
+    source text length. The duration term is only an upper CAP -- it guards the case
+    where the source cue's text already overruns its own time span (loose ASR
+    segmentation), rather than driving the budget itself; see
+    specs/measure-chars-per-second-budget.md.
+    """
     duration = max(end - start, 0.0)
-    return max(int(duration * _CHARS_PER_SECOND), 1)
+    ratio = _EXPANSION_RATIO.get(output_lang, _EXPANSION_RATIO["default"])
+    return max(int(min(len(text) * ratio, duration * _MAX_SPEAKABLE_CPS)), 1)
 
 
 def _build_asr_provider(
@@ -352,7 +382,7 @@ def create_subtitles(
         if abs(duration - _DEGENERATE_CUE_SECONDS) <= _DEGENERATE_CUE_TOLERANCE:
             near_fixed_cadence += 1
 
-        budget_chars = _budget_chars(segment.start, segment.end)
+        budget_chars = _budget_chars(segment.start, segment.end, segment.text, srt_lang)
         text = translator(segment.text, srt_lang, budget_chars=budget_chars)
         logger.debug(
             f"[measure] measure=translate id={segment.id} start={segment.start:.3f} "
