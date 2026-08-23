@@ -99,6 +99,9 @@ class ScribeTranscribe:
 
         return self._group_words(words)
 
+    # Deliberately separate from movie_subtitles/diarize.py's overlap-based split
+    # (used for --asr-engine local/openai, which lack Scribe's native per-word
+    # speaker_id) -- do not unify the two.
     def _group_words(self, words: Iterable[Any]) -> Iterable[Segment]:
         segment_id = 0
         buffer: list[Any] = []

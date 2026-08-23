@@ -19,20 +19,34 @@ movie_subtitles/
   __init__.py      # side-effecting: configures stdout INFO logging on import
   cli.py           # argparse entry point + create_subtitles() orchestration, engine
                     # selection, translation-budget derivation, top-level error handling.
-                    # _build_diarizer() takes no arguments and always builds
-                    # pyannote_.py:Diarize; the needs_diarization guard is the only
-                    # place deciding whether diarisation runs at all. When it does,
-                    # cli.py first extracts a mono 16 kHz wav via ffmpeg.py:run() into
-                    # a tempfile.TemporaryDirectory() (pyannote's torchaudio/
-                    # torchcodec loader may not decode a video container directly) and
-                    # diarizes that wav, up front, before the still-lazy segment loop
-                    # starts -- extraction and diarize() share one try/except, so an
-                    # extraction failure degrades the same way a diarisation failure
-                    # does. _speaker_for_span/_split_segment_by_speaker/
-                    # _diarized_segments then merge the resulting Turn list onto each
-                    # ASR segment by temporal overlap, and the latter smooths any
-                    # unlabelled word onto a neighbouring speaker label rather than
-                    # letting it fragment a cue on its own
+                    # Diarisation is orchestration only here now: the needs_diarization
+                    # guard is the only place deciding whether diarisation runs at all,
+                    # and _diarize_or_warn(fpath, asr_engine) is the single try/except
+                    # that builds pyannote_.py:Diarize, extracts a mono 16 kHz wav via
+                    # ffmpeg.py:extract_mono_wav() into a tempfile.TemporaryDirectory()
+                    # (pyannote's torchaudio/torchcodec loader may not decode a video
+                    # container directly), and calls diarize() on that wav, up front,
+                    # before the still-lazy segment loop starts -- one ImportError
+                    # re-raise, one Exception -> WARNING + [] degrade, mirroring
+                    # _dub_and_mux's handling of separate.py failures. The resulting
+                    # Turn list is threaded into diarize.py:label_segments(), which does
+                    # the actual overlap-based merging/splitting/smoothing algorithm --
+                    # moved out of cli.py entirely, see diarize.py below
+  diarize.py       # label_segments(segments, turns): lazily merges pyannote.audio
+                    # diarisation turns onto ASR segments by temporal overlap
+                    # (word-level, splitting a segment into one sub-segment per
+                    # contiguous speaker run, when segment.words is populated; cue-level
+                    # majority overlap otherwise), for --asr-engine local/openai, which
+                    # don't diarize natively (issue #27). A forward-only _TurnCursor
+                    # instance encapsulates the turn-index state that used to be
+                    # threaded manually through cli.py's split function. Stays lazy --
+                    # never materializes `segments` -- so the caller's tqdm loop still
+                    # drives ASR inference and the progress bar. A word overlapping no
+                    # turn is smoothed onto a neighbouring labelled word rather than
+                    # fragmenting its own run; a segment with no labelled word at all
+                    # stays entirely speaker=None. Deliberately separate from
+                    # providers/elevenlabs.py:ScribeTranscribe._group_words (Scribe's
+                    # native per-word speaker_id split) -- do not unify the two
   srt.py           # segment -> SRT block formatting, provider-agnostic
   dub.py           # scene-anchored TTS synthesis: groups segments by inter-segment
                     # silence gap (word-level gaps when available, else cue-boundary
@@ -91,8 +105,11 @@ movie_subtitles/
                     # original track to keep and to read its layout/rate) + run(): the
                     # one place that invokes ffmpeg and turns a non-zero exit into a
                     # RuntimeError quoting its
-                    # stderr, shared by dub.py, mux.py, voices.py and cli.py (which
-                    # calls it to extract the wav fed to the diarizer)
+                    # stderr, shared by dub.py, mux.py, voices.py and cli.py.
+                    # extract_mono_wav(source, out_path, rate=16000) is the one literal
+                    # ffmpeg argv cli.py still needs directly -- a plain -i cut to mono
+                    # PCM wav, used to feed the diarizer a container pyannote.audio's
+                    # own loader may not decode
   dubbing.py        # ManagedDub: the --managed path, independent of the rest
   providers/
     base.py          # Word (frozen: start/end/text) + Segment dataclass (start/end/

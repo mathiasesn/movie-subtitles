@@ -104,7 +104,7 @@ class OpenAITranscribe:
         # it falls inside that segment. Words in a gap before/between/after
         # segments are dropped, same as before.
         segment_list = list(segments)
-        words_by_index: dict[int, list[Word]] = {}
+        words_by_index: list[list[Word]] = [[] for _ in range(len(segment_list))]
         segment_index = 0
         for word in words:
             word_start = getattr(word, "start", None)
@@ -119,7 +119,7 @@ class OpenAITranscribe:
                 break
             segment = segment_list[segment_index]
             if segment.start <= midpoint < segment.end:
-                words_by_index.setdefault(segment_index, []).append(
+                words_by_index[segment_index].append(
                     Word(start=word_start, end=word_end, text=word_text)
                 )
 
@@ -132,7 +132,7 @@ class OpenAITranscribe:
                 start=segment.start,
                 end=segment.end,
                 text=text,
-                words=words_by_index.get(segment_id) or None,
+                words=words_by_index[segment_id] or None,
             )
 
 

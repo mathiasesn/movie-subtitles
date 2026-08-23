@@ -4,17 +4,16 @@ import shutil
 import subprocess
 import tempfile
 from argparse import ArgumentParser, ArgumentTypeError
-from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
 from tqdm.auto import tqdm
 
-from movie_subtitles.ffmpeg import run as run_ffmpeg
+from movie_subtitles.diarize import label_segments
+from movie_subtitles.ffmpeg import extract_mono_wav
 from movie_subtitles.providers.base import (
     AlignmentProvider,
     ASRProvider,
-    DiarizationProvider,
     Segment,
     TranslationProvider,
     TTSProvider,
@@ -94,159 +93,54 @@ def _build_asr_provider(
         raise ValueError(f"Unknown ASR engine: {asr_engine}")
 
 
-def _build_diarizer() -> DiarizationProvider:
-    """Build the pyannote.audio diarizer.
+def _diarize_or_warn(fpath: Path, asr_engine: str) -> list[Turn]:
+    """Build the diarizer, extract a mono wav, and diarize -- or degrade to `[]`.
 
     Callers only reach this when diarisation is actually needed (see
     `create_subtitles`'s `needs_diarization` guard -- the resolved ASR engine doesn't
-    already diarize natively and --voice-match isn't "off"); this builder no longer
-    re-tests that condition. The pyannote.audio (and therefore torch) import happens
-    only inside this call, so a run that doesn't need diarisation never pays that
-    import cost -- mirroring the lazy-import convention the other builders and
-    separate.py already follow.
+    already diarize natively and --voice-match isn't "off"). Build, extraction, and
+    `diarize()` all run under one try, mirroring `_dub_and_mux`'s handling of
+    separate.py failures: an `ImportError` (a broken install -- pyannote.audio is a
+    declared hard dependency) propagates uncaught, while any other failure (a missing
+    HF_TOKEN, a decode/inference error, ...) is logged as one WARNING and degrades the
+    run to a single voice (every segment's speaker stays None) rather than aborting it.
+
+    The pyannote.audio (and therefore torch) import happens only inside this call, so
+    a run that doesn't need diarisation never pays that import cost -- mirroring the
+    lazy-import convention the other builders and separate.py already follow.
     """
-    from movie_subtitles.providers.pyannote_ import Diarize
+    try:
+        from movie_subtitles.providers.pyannote_ import Diarize
 
-    return Diarize()
+        diarizer = Diarize()
 
-
-def _speaker_for_span(
-    turns: list[Turn], start: float, end: float, start_idx: int
-) -> tuple[str | None, int]:
-    """Return the speaker with greatest overlap with [start, end), and a resume index.
-
-    `turns` is sorted by start and spans (word or cue) are visited in ascending time
-    order, so `start_idx` only ever advances -- once a turn ends at or before the
-    current span's start it can never overlap a later span either, so it is skipped for
-    good rather than rescanned on every call.
-    """
-    while start_idx < len(turns) and turns[start_idx].end <= start:
-        start_idx += 1
-
-    overlaps: dict[str, float] = {}
-    idx = start_idx
-    while idx < len(turns) and turns[idx].start < end:
-        turn = turns[idx]
-        overlap = min(turn.end, end) - max(turn.start, start)
-        if overlap > 0:
-            overlaps[turn.speaker] = overlaps.get(turn.speaker, 0.0) + overlap
-        idx += 1
-
-    if not overlaps:
-        return None, start_idx
-    return max(overlaps, key=overlaps.get), start_idx
-
-
-def _split_segment_by_speaker(
-    segment: Segment, turns: list[Turn], start_idx: int, next_id: int
-) -> tuple[list[Segment], int, int]:
-    """Split `segment` into one sub-segment per contiguous speaker run.
-
-    Uses word-level overlap against `turns` when `segment.words` is populated (true for
-    every local/openai segment now that both request word timestamps), which is what
-    makes splitting on speaker change expressible at all. A segment with no words is
-    left whole, labelled with its single majority speaker. Sub-segments -- and an
-    unsplit segment -- get a fresh id from `next_id`, since a split segment no longer
-    maps 1:1 onto the original ASR id.
-    """
-    if not segment.words:
-        speaker, start_idx = _speaker_for_span(turns, segment.start, segment.end, start_idx)
-        sub = Segment(
-            id=next_id,
-            start=segment.start,
-            end=segment.end,
-            text=segment.text,
-            words=segment.words,
-            speaker=speaker,
-        )
-        return [sub], start_idx, next_id + 1
-
-    word_speakers: list[str | None] = []
-    for word in segment.words:
-        speaker, start_idx = _speaker_for_span(turns, word.start, word.end, start_idx)
-        word_speakers.append(speaker)
-
-    # A word that overlaps no diarisation turn (a silence gap, or a diarizer miss)
-    # comes back as None from _speaker_for_span above. Left as-is, a single such word
-    # in the middle of a sentence would form its own one-word run and fragment one cue
-    # into three. Smooth it to a neighbouring label instead -- previous labelled word
-    # first, else next labelled word -- so it merges into an adjacent run rather than
-    # splitting one. If nothing in the segment got a label at all, leave every word
-    # None: that's the genuine "diarisation found nothing here" case and must stay
-    # distinguishable from a smoothed gap.
-    if any(speaker is not None for speaker in word_speakers):
-        smoothed: list[str | None] = list(word_speakers)
-        last_label: str | None = None
-        for i, speaker in enumerate(smoothed):
-            if speaker is None:
-                smoothed[i] = last_label
-            else:
-                last_label = speaker
-        next_label: str | None = None
-        for i in range(len(smoothed) - 1, -1, -1):
-            if smoothed[i] is not None:
-                next_label = smoothed[i]
-            elif next_label is not None:
-                smoothed[i] = next_label
-        word_speakers = smoothed
-
-    runs: list[tuple[int, int]] = []
-    run_start = 0
-    for i in range(1, len(segment.words) + 1):
-        if i == len(segment.words) or word_speakers[i] != word_speakers[run_start]:
-            runs.append((run_start, i))
-            run_start = i
-
-    if len(runs) == 1:
-        # No speaker change inside this segment: keep the original span/text intact
-        # rather than reconstructing text from word tokens, which would risk drifting
-        # spacing/punctuation for no benefit.
-        sub = Segment(
-            id=next_id,
-            start=segment.start,
-            end=segment.end,
-            text=segment.text,
-            words=segment.words,
-            speaker=word_speakers[0],
-        )
-        return [sub], start_idx, next_id + 1
-
-    out: list[Segment] = []
-    for run_start_i, run_end_i in runs:
-        run_words = segment.words[run_start_i:run_end_i]
-        out.append(
-            Segment(
-                id=next_id,
-                start=run_words[0].start,
-                end=run_words[-1].end,
-                # Concatenate raw tokens rather than joining with a space: both
-                # faster-whisper and the OpenAI API already carry their own leading
-                # whitespace on each word where the language uses it (e.g. " world"),
-                # so plain concatenation preserves original spacing for space-delimited
-                # languages while staying correct for CJK/Thai, which a " ".join would
-                # corrupt by injecting spurious spaces.
-                text="".join(w.text for w in run_words).strip(),
-                words=run_words,
-                speaker=word_speakers[run_start_i],
+        if asr_engine == "openai":
+            logger.warning(
+                "Diarizing --asr-engine openai output: speaker labels are assigned "
+                "by overlapping diarisation turns against whisper-1's ASR segment "
+                "spans. whisper-1's segment timestamps are known to collapse to "
+                "uniform 1.000s spans on music-heavy or dialogue-sparse audio, which "
+                "would make those labels confidently wrong rather than merely "
+                "absent. Prefer --asr-engine elevenlabs for multi-speaker material."
             )
-        )
-        next_id += 1
 
-    return out, start_idx, next_id
-
-
-def _diarized_segments(segments: Iterable[Segment], turns: list[Turn]) -> Iterator[Segment]:
-    """Lazily label (and, on a speaker change, split) each segment as it is consumed.
-
-    Stays lazy -- pulls from `segments` one at a time and yields as it goes -- so the
-    caller's `for segment in tqdm(segments, ...)` loop still drives ASR inference and
-    the progress bar; nothing here materializes the underlying generator.
-    """
-    start_idx = 0
-    next_id = 0
-    for segment in segments:
-        subs, start_idx, next_id = _split_segment_by_speaker(segment, turns, start_idx, next_id)
-        yield from subs
+        # pyannote.audio's loader is torchaudio/torchcodec-based and may not be able
+        # to decode a video container the way demucs's ffmpeg-backed Separator can --
+        # so extract a small mono 16 kHz wav with ffmpeg first and hand pyannote that
+        # instead of the source media directly.
+        with tempfile.TemporaryDirectory(prefix="movie-subtitles-diarize-") as tmp_dir:
+            audio_path = Path(tmp_dir) / f"{fpath.stem}.diarize.wav"
+            extract_mono_wav(fpath, audio_path)
+            return diarizer.diarize(audio_path)
+    except ImportError:
+        # pyannote.audio is a declared hard dependency, so an ImportError here (or
+        # from Diarize.__init__'s own lazy torch/pyannote imports) means a broken
+        # install, not a runtime failure -- fail the run rather than silently
+        # producing a worse dub. Mirrors separate.py's ImportError/Exception split.
+        raise
+    except Exception as exc:
+        logger.warning(f"Diarization failed ({exc}); dubbing will use a single voice.")
+        return []
 
 
 def _build_translation_provider(translation_engine: str, mt_model_name: str) -> TranslationProvider:
@@ -390,71 +284,14 @@ def create_subtitles(
     # generator is consumed -- not as a post-pass -- since its results must already be
     # available while .srt cues are being emitted from the lazy ASR loop below.
     needs_diarization = voice_match != "off" and resolved_asr_engine != "elevenlabs"
-    turns: list[Turn] = []
-    if needs_diarization:
-        diarizer: DiarizationProvider | None = None
-        try:
-            diarizer = _build_diarizer()
-        except ImportError:
-            # pyannote.audio is a declared hard dependency, so an ImportError here (or
-            # from Diarize.__init__'s own lazy torch/pyannote imports) means a broken
-            # install, not a runtime failure -- fail the run rather than silently
-            # producing a worse dub. Mirrors separate.py's ImportError/Exception split.
-            raise
-        except Exception as exc:
-            logger.warning(
-                f"Could not build the speaker diarizer ({exc}); dubbing will use a single voice."
-            )
-
-        if diarizer is not None:
-            if resolved_asr_engine == "openai":
-                logger.warning(
-                    "Diarizing --asr-engine openai output: speaker labels are assigned "
-                    "by overlapping diarisation turns against whisper-1's ASR segment "
-                    "spans. whisper-1's segment timestamps are known to collapse to "
-                    "uniform 1.000s spans on music-heavy or dialogue-sparse audio, which "
-                    "would make those labels confidently wrong rather than merely "
-                    "absent. Prefer --asr-engine elevenlabs for multi-speaker material."
-                )
-            try:
-                # pyannote.audio's loader is torchaudio/torchcodec-based and may not be
-                # able to decode a video container the way demucs's ffmpeg-backed
-                # Separator can -- so extract a small mono 16 kHz wav with ffmpeg first
-                # and hand pyannote that instead of the source media directly. This
-                # extraction sits inside the same try/except as diarize() itself so an
-                # extraction failure degrades exactly like any other diarisation
-                # failure (warn and fall back to a single voice) rather than aborting
-                # the run.
-                with tempfile.TemporaryDirectory(prefix="movie-subtitles-diarize-") as tmp_dir:
-                    audio_path = Path(tmp_dir) / f"{fpath.stem}.diarize.wav"
-                    run_ffmpeg(
-                        [
-                            "ffmpeg",
-                            "-y",
-                            "-i",
-                            str(fpath),
-                            "-vn",
-                            "-ac",
-                            "1",
-                            "-ar",
-                            "16000",
-                            str(audio_path),
-                        ],
-                        what=f"Extracting audio from {fpath.name} for diarisation",
-                    )
-                    turns = diarizer.diarize(audio_path)
-            except ImportError:
-                raise
-            except Exception as exc:
-                logger.warning(f"Diarization failed ({exc}); dubbing will use a single voice.")
-                turns = []
+    turns = _diarize_or_warn(fpath, resolved_asr_engine) if needs_diarization else []
 
     transcriber = _build_asr_provider(
         resolved_asr_engine, whisper_model_name, diarize=voice_match != "off"
     )
     segments = transcriber(fpath, audio_lang)
     if turns:
-        segments = _diarized_segments(segments, turns)
+        segments = label_segments(segments, turns)
 
     srt_lines = []
     dub_segments: list[Segment] = []
