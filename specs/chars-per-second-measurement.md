@@ -97,13 +97,19 @@ sample's English actors deliver their lines, which no budget-derivation change
 can fix; the `[0.9, 1.15]` `_MIN_RATE`/`_MAX_RATE` clamp in `dub.py` remains
 the last line of defense and still saturates on the worst group.
 
-Per-group drift in the paid verification: groups within tolerance went from 1
-of 3 to 2 of 3. Group 1 fully resolved (from a clamp-saturated -2.69s final
-drift to +0.33s, within tolerance, left at 1.0x). Group 0 improved (-5.81s
-final drift under the old `min()` derivation to -5.24s under the new `max()`
-derivation) but is **still clamp-saturated and still a structural shortfall,
-not a speaking-rate problem** the clamp can absorb — the gap narrowed, it did
-not close. Group 2 was already in tolerance and stayed there.
+Per-group drift is **not reproducible enough to carry a claim**, and an earlier
+version of this document over-read it. A replicate run under identical code
+(see Replication below) put Group 1 at -1.52s and clamp-saturated, where the
+first run had it at +0.33s and within tolerance -- so "groups within tolerance
+went from 1 of 3 to 2 of 3" held in one run and not the other. Group 1 sits
+near the tolerance boundary and lands on either side of it depending on how the
+ASR segments that pass.
+
+What *does* hold across both runs is Group 0: -5.24s and -4.54s final drift,
+clamp-saturated in both, against -5.81s under the old `min()` derivation. It is
+**still a structural shortfall, not a speaking-rate problem** the clamp can
+absorb -- the gap narrowed, it did not close. Group 2 stayed within tolerance
+in both runs.
 
 The honest follow-up is a further increase to `_EXPANSION_RATIO["da"]` and/or
 `_TARGET_SPEAKABLE_CPS` (and/or a translator-side steer toward denser
@@ -140,18 +146,49 @@ elevenlabs`, `--translation-engine anthropic`, `--tts-engine openai`,
 | median clip duration / source speech at 1.0x | 0.629 | 0.764 |
 | median % of budget the translator actually used | 87% | 74% |
 
-**Caveat 1 — the comparison is not a controlled A/B.** The ElevenLabs ASR
-re-run produced a different segmentation than the baseline run: 18 comparable
-translate records versus the baseline's 20, and Group 1 had 6 segments in this
-run versus 7 in the baseline. Group boundaries and counts therefore differ
-between the two runs, so the per-group drift figures above are indicative, not
-a controlled A/B.
+**Caveat 1 -- the comparison is not a controlled A/B, and this was measured,
+not just suspected.** The ElevenLabs ASR resegments on every run: 18 comparable
+translate records versus the baseline's 20, and Group 1 had 6 segments here
+versus 7 in the baseline. A replicate run (see Replication below) quantified
+what that costs -- the aggregate medians reproduced almost exactly, but the
+per-group drift figures moved by more than the improvement attributed to the
+change. **Treat the per-group numbers in this table as indicative only; the
+aggregate rows are the ones that carry weight.**
 
 **Caveat 2 — budget fill dropped.** Median budget fill fell from 87% to 74%:
 the translator does not consume all the new headroom the larger budget makes
 available, so the remaining shortfall is not purely a budgeting problem — part
 of it is that tts-1 speaks Danish faster than the source actors deliver their
 lines, which no budget change can fix.
+
+## Replication
+
+The step 2 run was repeated under identical code to separate the effect of the
+`max()` change from ordinary run-to-run variation (ASR resegmentation,
+translator and TTS nondeterminism). This matters because the paid runs are not
+a controlled A/B -- the ASR resegments on every run.
+
+| metric | baseline `min()` | `max()` run A | `max()` run B |
+| --- | --- | --- | --- |
+| median translated/source char ratio | 0.854 | 0.935 | 0.935 |
+| median clip duration / source speech at 1.0x | 0.629 | 0.764 | 0.736 |
+| median % of budget used by the translator | 87% | 74% | 71% |
+| Group 0 final drift | -5.81s | -5.24s | -4.54s |
+| Group 1 final drift | -2.69s | +0.33s | -1.52s |
+| groups within tolerance | 1 of 3 | 2 of 3 | 1 of 3 |
+
+**The aggregate figures replicate; the per-group figures do not.** The
+translated/source ratio returned 0.935 to three decimals in both runs, and
+clip-duration-against-source-speech (0.736-0.764) sits well clear of the
+baseline's 0.629, so the improvement those numbers describe is real. The
+per-group drift figures move by more than the improvement attributed to the
+change -- Group 1 swings from within tolerance to clamp-saturated between two
+runs of the same code -- so no claim should rest on them. Group 0's shortfall
+is the exception: it is clamp-saturated in every run measured, baseline and
+both `max()` runs.
+
+Aggregates here are medians over 18 segments; the group figures are 3 data
+points. That is the whole difference.
 
 ## Derived constants
 
@@ -206,6 +243,9 @@ MOVIE_SUBTITLES_LOG_LEVEL=DEBUG uv run movie-subtitles \
 - `data/measurements/step2-max-budget.measure.log` -- 50 `[measure]` lines from
   the step 2 paid verification run under the new `max()` derivation, the source
   of the Verification table above.
+- `data/measurements/step2-max-budget-repeat.measure.log` -- 53 `[measure]` lines
+  from the replicate of the step 2 run under identical code, the source of the
+  Replication table above.
 - `data/measurements/measure.py` -- the script used to parse the first three logs
   above and compute the medians cited in this document (source chars/slot-second,
   tts-1 Danish chars/sec, unconstrained en->da expansion ratio).
