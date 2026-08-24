@@ -306,11 +306,14 @@ data/measurements/         # the one committed subtree under data/ (.gitignore i
                            # is the analysis script behind
                            # specs/chars-per-second-measurement.md: free and offline by
                            # default, reproducing the median source chars/slot-second and
-                           # median TTS chars/second figures from the five committed
-                           # *.measure.log files (filtered [measure] DEBUG lines from real
-                           # runs); its --rerun-paid flag (off by default) instead makes
-                           # real paid ElevenLabs + Anthropic calls to re-derive the third
-                           # figure, the expansion ratio. measure.py PARSES the [measure]
+                           # median TTS chars/second figures from just two of the five
+                           # committed *.measure.log files (clip-translate-synth and
+                           # trailer-translate-synth; the other three -- verify-clip,
+                           # step2-max-budget, step2-max-budget-repeat -- are committed
+                           # records of the verification and replication runs, not
+                           # parsed); its --rerun-paid flag (off by default) additionally
+                           # makes real paid ElevenLabs + Anthropic calls to re-derive the
+                           # third figure, the expansion ratio. measure.py PARSES the [measure]
                            # log lines cli.py and dub.py emit -- a one-way coupling, no
                            # import edge from the package into data/ and no CI signal, so
                            # changing a [measure] field's name or order silently breaks

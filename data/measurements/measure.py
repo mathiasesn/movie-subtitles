@@ -1,9 +1,9 @@
 """Analysis script behind specs/chars-per-second-measurement.md -- committed record.
 
-Two logs sit next to this script: clip-translate-synth.measure.log and
-trailer-translate-synth.measure.log, already filtered down to just the
-`[measure]` lines from real runs. Parsing them offline (the default, no
-flags) reproduces:
+Five *.measure.log files sit next to this script, but only two are parsed:
+clip-translate-synth.measure.log and trailer-translate-synth.measure.log,
+already filtered down to just the `[measure]` lines from real runs. Parsing
+them offline (the default, no flags) reproduces:
   - median source English chars/slot-second (from both logs' translate lines)
   - median tts-1 Danish chars/sec at 1.0x (from both logs' synth pass=0 lines)
 
