@@ -1,5 +1,4 @@
 data/*
-!data/measurements/
 samples/
 
 # Claude Code local state (worktrees, settings)
