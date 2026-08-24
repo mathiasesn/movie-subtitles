@@ -416,8 +416,8 @@ def create_subtitles(
             segment.start, segment.end, segment.text, srt_lang, resolved_tts_engine
         )
         text = translator(segment.text, srt_lang, budget_chars=budget_chars)
-        # Field names/order here are a stable format consumed by an out-of-tree
-        # analysis script; changing them silently breaks it (no import edge, no CI).
+        # Field names/order here are parsed by scripts/measure.py; changing them
+        # silently breaks it (no import edge, no CI signal).
         logger.debug(
             f"[measure] measure=translate id={segment.id} start={segment.start:.3f} "
             f"end={segment.end:.3f} slot={segment.end - segment.start:.3f} "

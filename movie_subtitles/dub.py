@@ -203,8 +203,8 @@ def _synthesise_and_measure(
     clip_path = work_dir / f"segment_{segment.id:05d}_p{pass_num:02d}.mp3"
     _tts_with_retry(tts, text, clip_path, rate, voice)
     speech_start, speech_end = aligner(clip_path, text)
-    # Field names/order here are a stable format consumed by an out-of-tree
-    # analysis script; changing them silently breaks it (no import edge, no CI).
+    # Field names/order here are parsed by scripts/measure.py; changing them
+    # silently breaks it (no import edge, no CI signal).
     logger.debug(
         f"[measure] measure=synth id={segment.id} pass={pass_num} rate={rate:.3f} "
         f"tgt_chars={len(text)} speech_len={speech_end - speech_start:.3f} "

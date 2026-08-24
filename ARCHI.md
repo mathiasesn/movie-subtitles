@@ -294,6 +294,13 @@ movie_subtitles/
                                # vendor SDK imports
 .env.example                # placeholders for ELEVENLABS_API_KEY, ANTHROPIC_API_KEY,
                              # OPENAI_API_KEY, HF_TOKEN
+scripts/measure.py         # dev tool, not part of the package: parses the [measure]
+                           # DEBUG lines cli.py and dub.py emit to reproduce
+                           # _EXPANSION_RATIO / _TARGET_SPEAKABLE_CPS. Free and offline
+                           # by default; --rerun-paid makes real paid ASR/translation
+                           # calls. Its *.measure.log inputs under data/measurements/
+                           # are untracked, so it runs only where they exist locally.
+                           # Excluded from both build targets (see pyproject.toml)
 .github/workflows/ci.yml   # lint-only CI (ruff format --check, ruff check)
 pyproject.toml             # metadata, deps, console script, ruff config
 uv.lock                    # committed lockfile
