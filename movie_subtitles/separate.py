@@ -1,6 +1,6 @@
 """Demucs-backed source separation: split a source's audio into vocals/accompaniment.
 
-Feeds #24 (`--separate-background`, `specs/separate-background-stem-for-dub.md`):
+Feeds #24 (`--separate-background`):
 `mux_dub` wants to mix the dub over a bed that no longer contains the *original*
 dialogue, rather than merely ducking that dialogue underneath it. Producing that bed
 needs real source separation, not just an ffmpeg filter, hence Demucs.

@@ -52,7 +52,7 @@ def _unit_float(value: str) -> float:
     return n
 
 
-# Measured, not assumed -- see specs/chars-per-second-measurement.md. Sample:
+# Measured, not assumed. Sample:
 # data/paw-patrol-the-dino-movie-clip.webm (45s) + data/paw-patrol-the-dino-movie.webm
 # (137s), en -> da, --asr-engine elevenlabs, --translation-engine anthropic,
 # --tts-engine openai (tts-1), --voice-match off; 17 + 52 = 69 translated segments.
@@ -75,7 +75,7 @@ _EXPANSION_RATIO: dict[str, float] = {
 # actually hold, so a sparse source cue is not budgeted below what its slot can carry.
 # Keyed "<tts engine>:<target language>", like _EXPANSION_RATIO above is keyed by
 # language, because speaking rate depends on both -- and because this term now binds
-# on 55 of 68 measured segments (see specs/chars-per-second-measurement.md), so an
+# on 55 of 68 measured segments, so an
 # engine or language it was never measured on inherits it as the DOMINANT budget
 # term, not a rarely-hit ceiling.
 # Only "openai:da" is measured (69 synth pass=0 rate=1.0 measurements, same sample and
@@ -94,8 +94,8 @@ _TARGET_SPEAKABLE_CPS: dict[str, float] = {
 _NO_VOICES: dict[str | None, str | None] = {}
 
 # Degenerate-ASR-timings detection, all product policy tuned against the single
-# observed sample (98 of 106 segments exactly 1.000s on a ~137s trailer, see
-# specs/fix-smoke-run-findings.md): a segment whose duration is within
+# observed sample (98 of 106 segments exactly 1.000s on a ~137s trailer): a
+# segment whose duration is within
 # _DEGENERATE_CUE_TOLERANCE of _DEGENERATE_CUE_SECONDS counts toward the stuck-cadence
 # tally (the tolerance, not exact equality, so a vendor jittering the cadence by a
 # millisecond still matches), and the run warns only when the tally both clears the
@@ -142,8 +142,7 @@ def _budget_chars(start: float, end: float, text: str, output_lang: str, tts_eng
     underrun (translation too short/rushed) to overrun (translation doesn't fit its
     slot). `tts_engine` selects the rate because how fast a slot can be spoken is a
     property of the engine as well as the language; only "openai:da" is measured
-    today, and every other pair falls back to that same figure. See
-    specs/chars-per-second-measurement.md.
+    today, and every other pair falls back to that same figure.
     """
     ratio = _EXPANSION_RATIO.get(output_lang, _EXPANSION_RATIO["default"])
     cps = _TARGET_SPEAKABLE_CPS.get(f"{tts_engine}:{output_lang}", _TARGET_SPEAKABLE_CPS["default"])
@@ -314,7 +313,7 @@ def create_subtitles(
         presets = load_preset_table(voice_preset_table)
 
     # --engine is the shorthand that sets all stages; --asr-engine/--translation-engine/
-    # --tts-engine override it per stage (Goal 2 of specs/openai-api-key-support.md).
+    # --tts-engine override it per stage.
     resolved_asr_engine = asr_engine if asr_engine is not None else engine
     resolved_translation_engine = translation_engine if translation_engine is not None else engine
     resolved_tts_engine = tts_engine if tts_engine is not None else engine
@@ -417,8 +416,8 @@ def create_subtitles(
             segment.start, segment.end, segment.text, srt_lang, resolved_tts_engine
         )
         text = translator(segment.text, srt_lang, budget_chars=budget_chars)
-        # Field names/order here are parsed by data/measurements/measure.py; changing
-        # them silently breaks it (no import edge, no CI signal).
+        # Field names/order here are a stable format consumed by an out-of-tree
+        # analysis script; changing them silently breaks it (no import edge, no CI).
         logger.debug(
             f"[measure] measure=translate id={segment.id} start={segment.start:.3f} "
             f"end={segment.end:.3f} slot={segment.end - segment.start:.3f} "

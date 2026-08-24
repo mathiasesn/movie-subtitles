@@ -55,9 +55,9 @@ def configure_logging() -> None:
         logging.getLogger(name).setLevel(level)
 
 
-# MOVIE_SUBTITLES_LOG_LEVEL has no CLI flag by design: measurement runs (see
-# specs/chars-per-second-measurement.md) need the per-segment DEBUG lines cli.py and
-# dub.py emit, without every invocation growing a --log-level flag.
+# MOVIE_SUBTITLES_LOG_LEVEL has no CLI flag by design: measurement runs need the
+# per-segment DEBUG lines cli.py and dub.py emit, without every invocation growing
+# a --log-level flag.
 logging.basicConfig(
     format="[%(asctime)s][%(levelname)s][%(name)s] %(message)s",
     datefmt="%d/%m/%Y-%H:%M:%S",
