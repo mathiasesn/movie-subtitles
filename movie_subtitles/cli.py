@@ -70,12 +70,24 @@ _EXPANSION_RATIO: dict[str, float] = {
     "default": 1.1,
 }
 
-# Measured median tts-1 (OpenAI TTS) Danish chars/second at rate 1.0, from the same
-# sample and run as _EXPANSION_RATIO above (69 synth pass=0 rate=1.0 measurements).
-# This is a FLOOR: the number of characters of synthesised speech that the slot can
-# actually hold at the measured target-language rate, so a sparse source cue is not
-# budgeted below what its slot can carry. Also PROVISIONAL, same caveat as above.
-_TARGET_SPEAKABLE_CPS = 19.822
+# Measured median chars/second the TTS engine speaks the target language at, rate 1.0.
+# A FLOOR in _budget_chars: how many characters of synthesised speech the slot can
+# actually hold, so a sparse source cue is not budgeted below what its slot can carry.
+# Keyed "<tts engine>:<target language>", like _EXPANSION_RATIO above is keyed by
+# language, because speaking rate depends on both -- and because this term now binds
+# on 55 of 68 measured segments (see specs/chars-per-second-measurement.md), so an
+# engine or language it was never measured on inherits it as the DOMINANT budget
+# term, not a rarely-hit ceiling.
+# Only "openai:da" is measured (69 synth pass=0 rate=1.0 measurements, same sample and
+# run as _EXPANSION_RATIO). `default` deliberately repeats that same figure rather
+# than inventing a second one: it is what every engine/language pair already got
+# before this table existed, so the table changes no budget today. It exists to make
+# the unmeasured extrapolation visible and to give the next measured fit somewhere to
+# go. PROVISIONAL, same caveat as _EXPANSION_RATIO.
+_TARGET_SPEAKABLE_CPS: dict[str, float] = {
+    "openai:da": 19.822,
+    "default": 19.822,
+}
 
 # Shared empty default for the `voices` kwarg -- a mutable literal default is a bugbear
 # violation (B006), so this module-level constant stands in for it; never mutated.
@@ -110,7 +122,7 @@ def _warns_degenerate(segment_count: int, near_fixed_cadence: int) -> bool:
     )
 
 
-def _budget_chars(start: float, end: float, text: str, output_lang: str) -> int:
+def _budget_chars(start: float, end: float, text: str, output_lang: str, tts_engine: str) -> int:
     """Derive a translation length budget (in characters) from source text and slot.
 
     The budget is the LARGER of two independently measured lower bounds, not a
@@ -124,17 +136,23 @@ def _budget_chars(start: float, end: float, text: str, output_lang: str) -> int:
     max() instead ensures a sparse source cue is still budgeted up to what its slot
     can carry, not just what the ratio predicts.
 
-    Known trade-off: `_TARGET_SPEAKABLE_CPS` is a MEDIAN, not a maximum, so used as a
-    floor it will overshoot the slot for roughly half of segments by construction --
-    if the translator actually fills the larger budget, the failure mode can flip
-    from underrun (translation too short/rushed) to overrun (translation doesn't fit
-    its slot). See specs/chars-per-second-measurement.md.
+    Known trade-off: the speaking rate is a MEDIAN, not a maximum, so used as a floor
+    it will overshoot the slot for roughly half of segments by construction -- if the
+    translator actually fills the larger budget, the failure mode can flip from
+    underrun (translation too short/rushed) to overrun (translation doesn't fit its
+    slot). `tts_engine` selects the rate because how fast a slot can be spoken is a
+    property of the engine as well as the language; only "openai:da" is measured
+    today, and every other pair falls back to that same figure. See
+    specs/chars-per-second-measurement.md.
     """
-    duration = max(end - start, 0.0)
     ratio = _EXPANSION_RATIO.get(output_lang, _EXPANSION_RATIO["default"])
+    cps = _TARGET_SPEAKABLE_CPS.get(f"{tts_engine}:{output_lang}", _TARGET_SPEAKABLE_CPS["default"])
     expected = len(text) * ratio
-    slot_capacity = duration * _TARGET_SPEAKABLE_CPS
-    return max(int(max(expected, slot_capacity)), 1)
+    # No `max(end - start, 0.0)` guard: a degenerate cue makes this term negative,
+    # which simply loses the max() below -- the clamp it used to need was a property
+    # of the old min().
+    slot_capacity = (end - start) * cps
+    return max(int(expected), int(slot_capacity), 1)
 
 
 def _build_asr_provider(
@@ -395,8 +413,12 @@ def create_subtitles(
         if abs(duration - _DEGENERATE_CUE_SECONDS) <= _DEGENERATE_CUE_TOLERANCE:
             near_fixed_cadence += 1
 
-        budget_chars = _budget_chars(segment.start, segment.end, segment.text, srt_lang)
+        budget_chars = _budget_chars(
+            segment.start, segment.end, segment.text, srt_lang, resolved_tts_engine
+        )
         text = translator(segment.text, srt_lang, budget_chars=budget_chars)
+        # Field names/order here are parsed by data/measurements/measure.py; changing
+        # them silently breaks it (no import edge, no CI signal).
         logger.debug(
             f"[measure] measure=translate id={segment.id} start={segment.start:.3f} "
             f"end={segment.end:.3f} slot={segment.end - segment.start:.3f} "

@@ -197,11 +197,15 @@ _EXPANSION_RATIO: dict[str, float] = {
     "da": 1.036,
     "default": 1.1,
 }
-_TARGET_SPEAKABLE_CPS = 19.822
+_TARGET_SPEAKABLE_CPS: dict[str, float] = {
+    "openai:da": 19.822,
+    "default": 19.822,
+}
 ```
 
 `_budget_chars(start, end, text, output_lang)` returns
-`max(int(max(len(text) * ratio, duration * _TARGET_SPEAKABLE_CPS)), 1)` — the
+`max(int(len(text) * ratio), int(duration * cps), 1)`, where `cps` is looked up as
+`_TARGET_SPEAKABLE_CPS[f"{tts_engine}:{output_lang}"]` falling back to `default` — the
 expansion-ratio term and the duration-derived term are both independently
 measured floors, and the larger one wins; neither is primary and neither caps
 the other. Measured across the 68 pooled segments used for the offline
