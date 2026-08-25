@@ -345,7 +345,7 @@ def _submit_group(
 
 
 def _resolve(
-    batches: Iterable[list[Future[_Clip]]], abort_event: threading.Event
+    batches: Iterable[list[Future[_Clip]]], *, abort_event: threading.Event
 ) -> list[list[_Clip]]:
     """Wait for every future across every batch in `batches`, failing fast, and return
     their clips per batch.
@@ -400,7 +400,7 @@ def _resolve(
     if any(future.cancelled() or future.exception() is not None for future in done):
         # Set the abort flag first, before cancelling the queued tail: this is what stops
         # calls that have not yet issued their vendor request, not merely ones that have
-        # not yet started (see module docstring above).
+        # not yet started (see this function's own docstring above).
         abort_event.set()
 
         # Cancel the still-queued tail; a future that already started or finished by the
@@ -428,7 +428,7 @@ def _resolve(
 
         logger.warning(
             f"Dub synthesis task failed: {succeeded} succeeded, {len(failures)} failed, "
-            f"{aborted} aborted before calling the vendor, {cancelled} cancelled before "
+            f"{aborted} aborted before their next vendor call, {cancelled} cancelled before "
             f"starting, {in_flight} still in flight and will finish before the abort "
             f"completes, out of {len(futures)} segment(s)."
         )
@@ -626,7 +626,7 @@ def synthesise_track(
             for group in groups
         ]
         clips_by_group: dict[int, list[_Clip]] = dict(
-            enumerate(_resolve(initial_futures, abort_event))
+            enumerate(_resolve(initial_futures, abort_event=abort_event))
         )
 
         # Layout pass (pure arithmetic): compute placements/drift and decide which groups
@@ -716,7 +716,11 @@ def synthesise_track(
                 for idx, rate in rates.items()
             }
             pass_clips = dict(
-                zip(pass_futures, _resolve(pass_futures.values(), abort_event), strict=True)
+                zip(
+                    pass_futures,
+                    _resolve(pass_futures.values(), abort_event=abort_event),
+                    strict=True,
+                )
             )
 
             still_pending: dict[int, tuple[float, float]] = {}
