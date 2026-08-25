@@ -6,9 +6,11 @@ from pathlib import Path
 from typing import Any
 
 from elevenlabs.client import ElevenLabs
+from elevenlabs.core.api_error import ApiError
 from elevenlabs.types.voice_settings import VoiceSettings
 
 from movie_subtitles.providers.base import Segment, Word
+from movie_subtitles.providers.errors import vendor_errors
 
 logger = logging.getLogger("elevenlabs")
 
@@ -42,7 +44,7 @@ def clone_voice(client: ElevenLabs, name: str, sample_paths: list[Path]) -> str:
     responsible for deleting it (via `delete_voice`) once it is no longer needed.
     """
     logger.info(f"Cloning voice {name!r} from {len(sample_paths)} sample(s)")
-    with ExitStack() as stack:
+    with vendor_errors(ApiError, "ElevenLabs voice cloning request"), ExitStack() as stack:
         files = [stack.enter_context(open(path, "rb")) for path in sample_paths]
         response = client.voices.ivc.create(name=name, files=files)
 
@@ -52,7 +54,8 @@ def clone_voice(client: ElevenLabs, name: str, sample_paths: list[Path]) -> str:
 def delete_voice(client: ElevenLabs, voice_id: str) -> None:
     """Delete a previously cloned voice. Wraps `client.voices.delete`."""
     logger.info(f"Deleting voice {voice_id}")
-    client.voices.delete(voice_id)
+    with vendor_errors(ApiError, "ElevenLabs voice deletion request"):
+        client.voices.delete(voice_id)
 
 
 class ScribeTranscribe:
@@ -78,7 +81,10 @@ class ScribeTranscribe:
             fpath = Path(fpath)
 
         logger.info(f"Sending {fpath} to Scribe ({self.model_id})")
-        with open(fpath, "rb") as audio_file:
+        with (
+            vendor_errors(ApiError, "ElevenLabs Scribe transcription request"),
+            open(fpath, "rb") as audio_file,
+        ):
             response = self.client.speech_to_text.convert(
                 file=audio_file,
                 model_id=self.model_id,
@@ -223,18 +229,40 @@ class Speak:
         speed = max(_MIN_SPEED, min(_MAX_SPEED, speed))
         logger.info(f"Synthesising {len(text)} chars to {out_path} (speed={speed:.3f})")
 
-        audio_chunks = self.client.text_to_speech.convert(
-            voice or self.voice_id,
-            text=text,
-            model_id=self.model_id,
-            output_format=self.output_format,
-            voice_settings=VoiceSettings(speed=speed),
-        )
-
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(out_path, "wb") as audio_file:
-            for chunk in audio_chunks:
-                audio_file.write(chunk)
+        # `client.text_to_speech.convert` is annotated to return a lazy
+        # `typing.Iterator[bytes]`: the HTTP request may not actually be issued, and a
+        # vendor ApiError may not actually be raised, until the iterator is consumed
+        # below. So the ApiError guard has to span the iteration/write loop too, not
+        # just the `convert(...)` call -- confirmed against the installed SDK's
+        # elevenlabs/text_to_speech/raw_client.py, whose `convert` is typed
+        # `-> typing.Iterator[HttpResponse[typing.Iterator[bytes]]]`.
+        #
+        # Write to a temp file and rename into place only on success, so a mid-stream
+        # ApiError (e.g. the issue #20 429) never leaves a truncated/corrupt clip
+        # sitting at `out_path` for a later retry or caller to mistake for a good one.
+        # `finally: tmp_path.unlink(missing_ok=True)` is the single cleanup site for
+        # both a vendor failure and any other exception (e.g. a local OSError writing
+        # the chunk) -- `tmp_path.replace(out_path)` already consumed the temp file on
+        # success, so the unlink is a no-op there. A local OSError is not caught by
+        # `vendor_errors` (it only catches ApiError), so it still propagates as itself,
+        # never relabelled as a vendor request failure.
+        tmp_path = out_path.with_suffix(out_path.suffix + ".part")
+        try:
+            with vendor_errors(ApiError, "ElevenLabs TTS request"):
+                audio_chunks = self.client.text_to_speech.convert(
+                    voice or self.voice_id,
+                    text=text,
+                    model_id=self.model_id,
+                    output_format=self.output_format,
+                    voice_settings=VoiceSettings(speed=speed),
+                )
+                with open(tmp_path, "wb") as audio_file:
+                    for chunk in audio_chunks:
+                        audio_file.write(chunk)
+            tmp_path.replace(out_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
         return out_path
 
@@ -256,7 +284,10 @@ class Align:
 
     def align(self, clip: Path, text: str) -> tuple[float, float]:
         logger.debug(f"Aligning {clip} against {len(text)} chars of text")
-        with open(clip, "rb") as audio_file:
+        with (
+            vendor_errors(ApiError, "ElevenLabs forced alignment request"),
+            open(clip, "rb") as audio_file,
+        ):
             response = self.client.forced_alignment.create(file=audio_file, text=text)
 
         words = getattr(response, "words", None)
