@@ -3,7 +3,7 @@ import os
 from collections.abc import Iterable
 from pathlib import Path
 
-from openai import OpenAI
+from openai import OpenAI, OpenAIError
 
 from movie_subtitles.providers.base import Segment, Word
 from movie_subtitles.providers.prompt import SYSTEM_PROMPT, build_prompt
@@ -65,17 +65,20 @@ class OpenAITranscribe:
             fpath = Path(fpath)
 
         logger.info(f"Sending {fpath} to OpenAI transcriptions ({self.model})")
-        with open(fpath, "rb") as audio_file:
-            # timestamp_granularities=["word"] (which requires verbose_json) is
-            # requested unconditionally -- it enables speaker-change cue splitting
-            # and improves dub.py's gap grouping. Do not "optimise" this away.
-            response = self.client.audio.transcriptions.create(
-                file=audio_file,
-                model=self.model,
-                response_format="verbose_json",
-                timestamp_granularities=["segment", "word"],
-                language=audio_lang,
-            )
+        try:
+            with open(fpath, "rb") as audio_file:
+                # timestamp_granularities=["word"] (which requires verbose_json) is
+                # requested unconditionally -- it enables speaker-change cue splitting
+                # and improves dub.py's gap grouping. Do not "optimise" this away.
+                response = self.client.audio.transcriptions.create(
+                    file=audio_file,
+                    model=self.model,
+                    response_format="verbose_json",
+                    timestamp_granularities=["segment", "word"],
+                    language=audio_lang,
+                )
+        except OpenAIError as exc:
+            raise RuntimeError(f"OpenAI transcription request failed: {exc}") from exc
 
         segments = getattr(response, "segments", None)
         if not segments:
@@ -157,15 +160,18 @@ class OpenAITranslate:
     def translate(self, text: str, output_lang: str, budget_chars: int | None = None) -> str:
         prompt = build_prompt(text, output_lang, budget_chars)
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            max_completion_tokens=1024,
-            reasoning_effort="none",
-        )
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                max_completion_tokens=1024,
+                reasoning_effort="none",
+            )
+        except OpenAIError as exc:
+            raise RuntimeError(f"OpenAI translation request failed: {exc}") from exc
 
         translation = response.choices[0].message.content or ""
         return translation.strip()
@@ -205,12 +211,15 @@ class OpenAISpeak:
         speed = max(_MIN_SPEED, min(_MAX_SPEED, speed))
         logger.info(f"Synthesising {len(text)} chars to {out_path} (speed={speed:.3f})")
 
-        response = self.client.audio.speech.create(
-            model=self.model,
-            voice=voice or self.voice,
-            input=text,
-            speed=speed,
-        )
+        try:
+            response = self.client.audio.speech.create(
+                model=self.model,
+                voice=voice or self.voice,
+                input=text,
+                speed=speed,
+            )
+        except OpenAIError as exc:
+            raise RuntimeError(f"OpenAI TTS request failed: {exc}") from exc
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
         response.write_to_file(out_path)

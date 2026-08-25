@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from elevenlabs.client import ElevenLabs
+from elevenlabs.core.api_error import ApiError
 from elevenlabs.types.voice_settings import VoiceSettings
 
 from movie_subtitles.providers.base import Segment, Word
@@ -42,9 +43,12 @@ def clone_voice(client: ElevenLabs, name: str, sample_paths: list[Path]) -> str:
     responsible for deleting it (via `delete_voice`) once it is no longer needed.
     """
     logger.info(f"Cloning voice {name!r} from {len(sample_paths)} sample(s)")
-    with ExitStack() as stack:
-        files = [stack.enter_context(open(path, "rb")) for path in sample_paths]
-        response = client.voices.ivc.create(name=name, files=files)
+    try:
+        with ExitStack() as stack:
+            files = [stack.enter_context(open(path, "rb")) for path in sample_paths]
+            response = client.voices.ivc.create(name=name, files=files)
+    except ApiError as exc:
+        raise RuntimeError(f"ElevenLabs voice cloning request failed: {exc}") from exc
 
     return response.voice_id
 
@@ -52,7 +56,10 @@ def clone_voice(client: ElevenLabs, name: str, sample_paths: list[Path]) -> str:
 def delete_voice(client: ElevenLabs, voice_id: str) -> None:
     """Delete a previously cloned voice. Wraps `client.voices.delete`."""
     logger.info(f"Deleting voice {voice_id}")
-    client.voices.delete(voice_id)
+    try:
+        client.voices.delete(voice_id)
+    except ApiError as exc:
+        raise RuntimeError(f"ElevenLabs voice deletion request failed: {exc}") from exc
 
 
 class ScribeTranscribe:
@@ -78,13 +85,16 @@ class ScribeTranscribe:
             fpath = Path(fpath)
 
         logger.info(f"Sending {fpath} to Scribe ({self.model_id})")
-        with open(fpath, "rb") as audio_file:
-            response = self.client.speech_to_text.convert(
-                file=audio_file,
-                model_id=self.model_id,
-                language_code=audio_lang,
-                diarize=self.diarize,
-            )
+        try:
+            with open(fpath, "rb") as audio_file:
+                response = self.client.speech_to_text.convert(
+                    file=audio_file,
+                    model_id=self.model_id,
+                    language_code=audio_lang,
+                    diarize=self.diarize,
+                )
+        except ApiError as exc:
+            raise RuntimeError(f"ElevenLabs Scribe transcription request failed: {exc}") from exc
 
         words = getattr(response, "words", None)
         if words is None:
@@ -223,19 +233,38 @@ class Speak:
         speed = max(_MIN_SPEED, min(_MAX_SPEED, speed))
         logger.info(f"Synthesising {len(text)} chars to {out_path} (speed={speed:.3f})")
 
-        audio_chunks = self.client.text_to_speech.convert(
-            voice or self.voice_id,
-            text=text,
-            model_id=self.model_id,
-            output_format=self.output_format,
-            voice_settings=VoiceSettings(speed=speed),
-        )
-
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(out_path, "wb") as audio_file:
-            for chunk in audio_chunks:
-                audio_file.write(chunk)
+        # `client.text_to_speech.convert` is annotated to return a lazy
+        # `typing.Iterator[bytes]`: the HTTP request may not actually be issued, and a
+        # vendor ApiError may not actually be raised, until the iterator is consumed
+        # below. So the ApiError guard has to span the iteration/write loop too, not
+        # just the `convert(...)` call -- confirmed against the installed SDK's
+        # elevenlabs/text_to_speech/raw_client.py, whose `convert` is typed
+        # `-> typing.Iterator[HttpResponse[typing.Iterator[bytes]]]`.
+        #
+        # Write to a temp file and rename into place only on success, so a mid-stream
+        # ApiError (e.g. the issue #20 429) never leaves a truncated/corrupt clip
+        # sitting at `out_path` for a later retry or caller to mistake for a good one.
+        tmp_path = out_path.with_suffix(out_path.suffix + ".part")
+        try:
+            audio_chunks = self.client.text_to_speech.convert(
+                voice or self.voice_id,
+                text=text,
+                model_id=self.model_id,
+                output_format=self.output_format,
+                voice_settings=VoiceSettings(speed=speed),
+            )
+            with open(tmp_path, "wb") as audio_file:
+                for chunk in audio_chunks:
+                    audio_file.write(chunk)
+        except ApiError as exc:
+            tmp_path.unlink(missing_ok=True)
+            raise RuntimeError(f"ElevenLabs TTS request failed: {exc}") from exc
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
 
+        tmp_path.replace(out_path)
         return out_path
 
 
@@ -256,8 +285,11 @@ class Align:
 
     def align(self, clip: Path, text: str) -> tuple[float, float]:
         logger.debug(f"Aligning {clip} against {len(text)} chars of text")
-        with open(clip, "rb") as audio_file:
-            response = self.client.forced_alignment.create(file=audio_file, text=text)
+        try:
+            with open(clip, "rb") as audio_file:
+                response = self.client.forced_alignment.create(file=audio_file, text=text)
+        except ApiError as exc:
+            raise RuntimeError(f"ElevenLabs forced alignment request failed: {exc}") from exc
 
         words = getattr(response, "words", None)
         if not words:

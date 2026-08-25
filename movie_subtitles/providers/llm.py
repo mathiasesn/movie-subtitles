@@ -32,12 +32,15 @@ class LLMTranslate:
     def translate(self, text: str, output_lang: str, budget_chars: int | None = None) -> str:
         prompt = build_prompt(text, output_lang, budget_chars)
 
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=1024,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=1024,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        except anthropic.AnthropicError as exc:
+            raise RuntimeError(f"Anthropic translation request failed: {exc}") from exc
 
         translation = next((b.text for b in response.content if b.type == "text"), "")
         return translation.strip()
