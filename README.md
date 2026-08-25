@@ -115,6 +115,58 @@ a gated model. Before it will load:
 Skipping this (or `--asr-engine elevenlabs`, which diarizes without it) is fine as long as
 you also pass `--voice-match off` — no token, no diarisation pass, no network call.
 
+## Config file
+
+A single per-user YAML file supplies defaults for every flag below except `--input`
+and `--config` itself, so you don't have to retype `--srt-lang da --voice-match preset`
+(or whatever your usual invocation is) on every run. It lives at
+`$XDG_CONFIG_HOME/movie-subtitles/config.yaml`, falling back to
+`~/.config/movie-subtitles/config.yaml` when `XDG_CONFIG_HOME` is unset, and is
+entirely optional — a missing file is not an error, it just means every flag falls
+back to its built-in default. Point at a different file with `--config <path>`; unlike
+the default location, an explicit `--config` path that doesn't exist is an error.
+
+Precedence, highest first: **explicit CLI flag > config file > built-in default.**
+
+Copy [`config.example.yaml`](config.example.yaml) to the location above (or anywhere,
+and pass it via `--config`) and uncomment the keys you want to override — every key in
+the example is commented out and set to its built-in default, so copying it as-is is a
+no-op. Keys mirror the CLI's own flag names (dashes become underscores) and are
+validated strictly at load time — an unknown key, wrong type, or an out-of-choices
+value raises an error naming the file and the key before any work starts:
+
+| Config key | Type | Default | Mirrors |
+| --- | --- | --- | --- |
+| `audio_lang` | string | `"en"` | `--audio-lang` |
+| `srt_lang` | string | `"da"` | `--srt-lang` |
+| `whisper_model` | string | `"large-v3"` | `--whisper-model` |
+| `mt_model` | string | `"jbochi/madlad400-3b-mt"` | `--mt-model` |
+| `engine` | `local` \| `elevenlabs` \| `openai` | `"local"` | `--engine` |
+| `asr_engine` | `local` \| `elevenlabs` \| `openai` or `null` | `null` | `--asr-engine` |
+| `translation_engine` | `local` \| `anthropic` \| `openai` or `null` | `null` | `--translation-engine` |
+| `tts_engine` | `elevenlabs` \| `openai` or `null` | `null` | `--tts-engine` |
+| `dub` | boolean | `false` | `--dub` / `--no-dub` |
+| `dub_workers` | positive integer | `1` | `--dub-workers` |
+| `dub_correction_passes` | positive integer | `3` | `--dub-correction-passes` |
+| `voice_match` | `off` \| `clone` \| `preset` \| `auto` | `"auto"` | `--voice-match` |
+| `keep_cloned_voices` | boolean | `false` | `--keep-cloned-voices` / `--no-keep-cloned-voices` |
+| `clone_min_seconds` | positive number | `30.0` | `--clone-min-seconds` |
+| `clone_target_seconds` | positive number | `60.0` | `--clone-target-seconds` |
+| `voice_preset_table` | string (path) or `null` | `null` | `--voice-preset-table` |
+| `duck_level` | number in `[0.0, 1.0]` or `null` | `null` | `--duck-level` |
+| `separate_background` | boolean | `false` | `--separate-background` / `--no-separate-background` |
+| `managed` | boolean | `false` | `--managed` / `--no-managed` |
+
+The four boolean flags (`--dub`, `--managed`, `--separate-background`,
+`--keep-cloned-voices`) now also accept a `--no-*` form (e.g. `--no-dub`), which is
+what lets a config file turn one of them on by default while a single invocation still
+turns it back off.
+
+**API keys never go in this file.** `ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY` and `HF_TOKEN` stay in `.env` (see "API keys" above) — a config key
+that looks like one of those names (case-insensitively) is rejected with an error
+pointing back at `.env`, rather than silently accepted and ignored.
+
 ## Usage
 
 ```shell
@@ -139,8 +191,8 @@ movie-subtitles --input clip.mp4 --managed
 ```
 
 Other flags: `--audio-lang`, `--srt-lang`, `--whisper-model`, `--mt-model`,
-`--dub-workers`, `--dub-correction-passes`, `--duck-level`, `--separate-background`.
-Run `movie-subtitles --help` for the full list.
+`--dub-workers`, `--dub-correction-passes`, `--duck-level`, `--separate-background`,
+`--config` (see "Config file" above). Run `movie-subtitles --help` for the full list.
 
 ### Speaker-matched dub voices
 

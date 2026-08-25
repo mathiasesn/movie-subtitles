@@ -14,9 +14,9 @@
 # names is rejected here with an error pointing back at .env.
 
 # audio_lang: "en"
-# srt_lang: "en"
-# whisper_model: "small"
-# mt_model: "google/madlad400-3b-mt"
+# srt_lang: "da"
+# whisper_model: "large-v3"
+# mt_model: "jbochi/madlad400-3b-mt"
 
 # engine: "local"                # local | elevenlabs | openai
 # asr_engine: null                # local | elevenlabs | openai (null = derive from --engine)
