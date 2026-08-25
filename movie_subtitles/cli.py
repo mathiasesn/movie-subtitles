@@ -10,7 +10,13 @@ from dotenv import find_dotenv, load_dotenv
 from tqdm.auto import tqdm
 
 from movie_subtitles import configure_logging
-from movie_subtitles.config import load_config
+from movie_subtitles.config import (
+    check_parser_coverage,
+    is_positive_float,
+    is_positive_int,
+    is_unit_float,
+    load_config,
+)
 from movie_subtitles.diarize import label_segments
 from movie_subtitles.ffmpeg import extract_mono_wav
 from movie_subtitles.providers.base import (
@@ -34,21 +40,21 @@ logger = logging.getLogger("cli")
 
 def _positive_int(value: str) -> int:
     n = int(value)
-    if n < 1:
+    if not is_positive_int(n):
         raise ArgumentTypeError(f"must be >= 1, got {n}")
     return n
 
 
 def _positive_float(value: str) -> float:
     n = float(value)
-    if n <= 0:
+    if not is_positive_float(n):
         raise ArgumentTypeError(f"must be > 0, got {n}")
     return n
 
 
 def _unit_float(value: str) -> float:
     n = float(value)
-    if not 0.0 <= n <= 1.0:
+    if not is_unit_float(n):
         raise ArgumentTypeError(f"must be between 0.0 and 1.0 inclusive, got {n}")
     return n
 
@@ -850,6 +856,10 @@ def main() -> None:
             "Mutually exclusive with --dub."
         ),
     )
+    # Outside the try below: a schema/option mismatch is this repo's bug, not a user
+    # error, so it should surface as a traceback rather than a tidy one-line message.
+    check_parser_coverage(parser)
+
     try:
         # Pre-pass: read --config (only) before set_defaults() runs, so a config file's
         # values become the parser's defaults rather than being applied after the fact --

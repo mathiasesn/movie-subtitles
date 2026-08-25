@@ -19,6 +19,7 @@ will import this module instead -- importing back would be circular).
 
 import logging
 import os
+from argparse import ArgumentParser
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +60,25 @@ _SECRET_KEYS = frozenset({"elevenlabs_api_key", "anthropic_api_key", "openai_api
 _ENGINE_CHOICES = ("local", "elevenlabs", "openai")
 _TRANSLATION_ENGINE_CHOICES = ("local", "anthropic", "openai")
 _TTS_ENGINE_CHOICES = ("elevenlabs", "openai")
+
+
+# The numeric bounds below are shared with cli.py's argparse `type=` callables
+# (_positive_int/_positive_float/_unit_float), which import them from here. The bounds
+# have to agree: a config key and its flag are the same setting, so a divergence would
+# not crash, it would silently accept through one door a value the other rejects. They
+# live in this module rather than cli.py because the import edge only runs one way --
+# cli.py imports config, never the reverse (see the module docstring).
+def is_positive_int(n: int) -> bool:
+    return n >= 1
+
+
+def is_positive_float(n: float) -> bool:
+    return n > 0
+
+
+def is_unit_float(n: float) -> bool:
+    return 0.0 <= n <= 1.0
+
 
 # Kinds of validation applied per key below.
 _STR = "str"
@@ -125,38 +145,25 @@ def _validate_value(
     if kind == _POSITIVE_INT:
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError(f"{file}: '{key}' must be a positive integer, got {value!r}")
-        if value < 1:
+        if not is_positive_int(value):
             raise ValueError(f"{file}: '{key}' must be >= 1, got {value!r}")
         return value
 
     if kind == _POSITIVE_FLOAT:
         if isinstance(value, bool) or not isinstance(value, int | float):
             raise ValueError(f"{file}: '{key}' must be a positive number, got {value!r}")
-        if value <= 0:
+        if not is_positive_float(value):
             raise ValueError(f"{file}: '{key}' must be > 0, got {value!r}")
         return float(value)
 
     if kind == _UNIT_FLOAT:
         if isinstance(value, bool) or not isinstance(value, int | float):
             raise ValueError(f"{file}: '{key}' must be a number in [0.0, 1.0], got {value!r}")
-        if not (0.0 <= value <= 1.0):
+        if not is_unit_float(value):
             raise ValueError(f"{file}: '{key}' must be in [0.0, 1.0], got {value!r}")
         return float(value)
 
     raise AssertionError(f"unhandled schema kind {kind!r}")  # pragma: no cover
-
-
-def _resolve_path(path: str | None) -> Path | None:
-    """The file to load, or None if there is none to load.
-
-    `path` given (from --config) must exist -- checked by the caller, which raises
-    naming it explicitly. `path` None falls back to default_config_path(), where a
-    missing file is not an error (mirrors _load_env()'s posture toward a missing .env).
-    """
-    if path is not None:
-        return Path(path)
-    default_path = default_config_path()
-    return default_path if default_path.exists() else None
 
 
 def load_config(path: str | None = None) -> dict[str, object]:
@@ -174,12 +181,18 @@ def load_config(path: str | None = None) -> dict[str, object]:
     expected values. The returned dict is meant to be applied via
     parser.set_defaults(**resolved), so its keys are exactly the argparse dest names.
     """
-    if path is not None and not Path(path).exists():
-        raise ValueError(f"config file not found: {path}")
-
-    file = _resolve_path(path)
-    if file is None:
-        return {}
+    # The two branches differ only in what a missing file means, so they stay together
+    # here rather than in a helper that could state only half of its own precondition:
+    # an explicit --config the user named must exist, while the discovered default is
+    # optional (same posture as _load_env()'s toward a missing .env).
+    if path is not None:
+        file = Path(path)
+        if not file.exists():
+            raise ValueError(f"config file not found: {path}")
+    else:
+        file = default_config_path()
+        if not file.exists():
+            return {}
 
     with file.open("r", encoding="utf-8") as fh:
         raw = yaml.safe_load(fh)
@@ -211,3 +224,47 @@ def load_config(path: str | None = None) -> dict[str, object]:
 
     logger.info(f"Loaded config from {file}")
     return resolved
+
+
+# Dests that are deliberately not configurable: --input is per-run, --config is what
+# names this file in the first place, and --help is argparse's own.
+_UNCONFIGURABLE_DESTS = frozenset({"help", "input", "config"})
+
+
+def check_parser_coverage(parser: ArgumentParser) -> None:
+    """Fail loudly if _SCHEMA and the CLI's options have drifted apart.
+
+    _SCHEMA restates cli.py's option surface because this module cannot import cli.py
+    (that direction would be circular), and nothing about that copy is enforced by the
+    type checker, the linter, or an import edge. Without this check, adding a flag and
+    forgetting the schema entry fails *nothing*: the flag is simply not configurable,
+    and the only person who finds out is a user whose config key comes back
+    "unrecognised". Adding a flag and forgetting to remove a schema entry is worse --
+    set_defaults() would set a dest no option owns.
+
+    Called from main() once the parser is built, and raises rather than warning: a
+    mismatch is a bug in this repo, not a mistake the user made or can fix.
+    """
+    # _actions is argparse's own registry of added options; there is no public
+    # accessor for it, and its shape has been stable across every 3.x.
+    parser_dests = {action.dest for action in parser._actions} - _UNCONFIGURABLE_DESTS
+
+    missing = parser_dests - set(_SCHEMA)
+    extra = set(_SCHEMA) - parser_dests
+    if missing or extra:
+        raise RuntimeError(
+            f"config._SCHEMA has drifted from cli.py's options: "
+            f"{sorted(missing)} not configurable, {sorted(extra)} match no flag"
+        )
+
+    # The choice sets are a second copy of the same kind, and drift there is quieter
+    # still: the config file would reject an engine the flag accepts, or vice versa.
+    for action in parser._actions:
+        if action.dest in _UNCONFIGURABLE_DESTS or not action.choices:
+            continue
+        _, choices, _ = _SCHEMA[action.dest]
+        if choices is not None and set(choices) != set(action.choices):
+            raise RuntimeError(
+                f"config._SCHEMA's choices for '{action.dest}' {sorted(choices)} have "
+                f"drifted from the flag's {sorted(action.choices)}"
+            )
