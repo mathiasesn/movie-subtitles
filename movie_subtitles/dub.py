@@ -1,6 +1,7 @@
 import logging
+import random
 import tempfile
-import time
+import threading
 from collections.abc import Iterable
 from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
@@ -52,9 +53,12 @@ _MAX_WORKERS = 1
 # violation (B006), so this module-level constant stands in for it; never mutated.
 _NO_VOICES: dict[str | None, str | None] = {}
 
-# Bounded retry around the TTS call: up to this many attempts, with an exponential
-# 2**(attempt-1) second backoff between them (1s, 2s, ...).
+# Bounded retry around the TTS call: up to this many attempts, with a full-jitter backoff
+# between them -- uniform(0, _TTS_BACKOFF_BASE * 2**(attempt-1)), so the *ceiling* doubles
+# each attempt (1s, 2s, ...) same as the old fixed backoff, but the actual sleep is sampled
+# rather than fixed, so colliding workers separate on retry instead of waking in lockstep.
 _TTS_MAX_ATTEMPTS = 3
+_TTS_BACKOFF_BASE = 1.0
 
 # Pre/post pad applied to each placed speech span before coalescing, so ducking (in
 # mux.py) steps down slightly ahead of the dub's speech and steps back up slightly
@@ -62,6 +66,17 @@ _TTS_MAX_ATTEMPTS = 3
 # stays instantaneous (mux.py's `volume` expression is a hard if/else, not a ramp) --
 # this only shifts where that step falls.
 _SPAN_PAD = 0.15
+
+
+class _Aborted(Exception):
+    """Raised by a worker that bails out early after `_resolve()` set the abort event.
+
+    Module-private sentinel distinguishing a cooperative early bail (no vendor call
+    issued, or a queued retry sleep cut short) from a genuine failure: `_resolve()`
+    classifies these into their own `aborted` count and excludes them from the
+    `failures` dict, so the lowest-submission-index re-raise can never surface an
+    early bail as the batch's reported cause.
+    """
 
 
 @dataclass(frozen=True)
@@ -95,35 +110,50 @@ def _required_rate(actual_duration: float, slot_duration: float) -> float:
 
 
 def _tts_with_retry(
-    tts: TTSProvider, text: str, clip_path: Path, rate: float, voice: str | None
+    tts: TTSProvider,
+    text: str,
+    clip_path: Path,
+    rate: float,
+    voice: str | None,
+    abort_event: threading.Event,
 ) -> None:
     """Call `tts` with a provider-agnostic bounded retry.
 
-    Up to `_TTS_MAX_ATTEMPTS` attempts, sleeping an exponential `2**(attempt-1)` seconds
-    between them; the last exception is re-raised if every attempt fails. Catches plain
-    `Exception` rather than a vendor 429 type so no vendor SDK needs importing into this
-    module, and transient network blips get covered too. This wraps only the TTS call --
-    NOT the aligner call, which is handled separately (see `_synthesise_and_measure`): an
-    aligner exception is an intended degrade signal that `FallbackAlign` acts on by moving
-    to the next tier and latching the failed one off, so retrying it here would fight that.
+    Up to `_TTS_MAX_ATTEMPTS` attempts, sleeping a full-jitter backoff between them --
+    `uniform(0, _TTS_BACKOFF_BASE * 2**(attempt-1))`, so the *ceiling* still doubles each
+    attempt (1s, 2s, ...) but the actual sleep is sampled, decorrelating workers that
+    collided on the same instant instead of letting them wake and re-collide in lockstep;
+    the last exception is re-raised if every attempt fails. Catches plain `Exception`
+    rather than a vendor 429 type so no vendor SDK needs importing into this module, and
+    transient network blips get covered too. This wraps only the TTS call -- NOT the
+    aligner call, which is handled separately (see `_synthesise_and_measure`): an aligner
+    exception is an intended degrade signal that `FallbackAlign` acts on by moving to the
+    next tier and latching the failed one off, so retrying it here would fight that.
 
     `voice` is passed straight through to every attempt unchanged -- retrying never
     substitutes a different voice for the one the caller resolved. `None` reaches the
     provider as-is, which is what makes it use its own configured default.
+
+    `abort_event` is checked before the TTS call is issued and before each retry sleep --
+    a set event raises `_Aborted` instead, so a queued retry is cut short rather than
+    slept through and a not-yet-issued call is never made once the batch is doomed.
     """
     for attempt in range(1, _TTS_MAX_ATTEMPTS + 1):
+        if abort_event.is_set():
+            raise _Aborted()
         try:
             tts(text, clip_path, speed=rate, voice=voice)
             return
         except Exception as exc:
             if attempt == _TTS_MAX_ATTEMPTS:
                 raise
-            backoff = 2 ** (attempt - 1)
+            backoff = random.uniform(0.0, _TTS_BACKOFF_BASE * 2 ** (attempt - 1))
             logger.warning(
-                f"TTS call for {clip_path.name} failed ({exc}); retrying in {backoff}s "
+                f"TTS call for {clip_path.name} failed ({exc}); retrying in {backoff:.1f}s "
                 f"(attempt {attempt}/{_TTS_MAX_ATTEMPTS})."
             )
-            time.sleep(backoff)
+            if abort_event.wait(backoff):
+                raise _Aborted() from None
 
 
 def _speech_bounds(segment: Segment) -> tuple[float, float]:
@@ -183,6 +213,7 @@ def _synthesise_and_measure(
     rate: float,
     pass_num: int,
     voice: str | None,
+    abort_event: threading.Event,
 ) -> _Clip:
     """Synthesise one segment at `rate` for correction pass `pass_num` and measure its
     speech boundaries.
@@ -199,9 +230,15 @@ def _synthesise_and_measure(
     provider's configured default"), threaded straight through to `_tts_with_retry` --
     it does not affect the on-disk path, since a segment's speaker (and therefore its
     voice) does not change across correction passes.
+
+    `abort_event` is checked before the TTS call is issued (in addition to the checks
+    inside `_tts_with_retry`'s own retry loop) -- raising `_Aborted` bails out before any
+    vendor call for a task that had not yet started when the batch was doomed.
     """
+    if abort_event.is_set():
+        raise _Aborted()
     clip_path = work_dir / f"segment_{segment.id:05d}_p{pass_num:02d}.mp3"
-    _tts_with_retry(tts, text, clip_path, rate, voice)
+    _tts_with_retry(tts, text, clip_path, rate, voice, abort_event)
     speech_start, speech_end = aligner(clip_path, text)
     # Field names/order here are parsed by scripts/measure.py; changing them
     # silently breaks it (no import edge, no CI signal).
@@ -271,6 +308,7 @@ def _submit_group(
     work_dir: Path,
     rate: float,
     pass_num: int,
+    abort_event: threading.Event,
     voices: dict[str | None, str | None] = _NO_VOICES,
 ) -> list[Future[_Clip]]:
     """Submit every segment of `group` to `executor` at `rate` for pass `pass_num`, in
@@ -284,6 +322,8 @@ def _submit_group(
     caller resolving one voice per group, since a group can span more than one speaker.
     `voices=None` (or a segment whose speaker has no entry) resolves to `None`, which is
     "no voice specified" all the way down to the provider.
+
+    `abort_event` is passed straight through to every submitted task, unmodified.
     """
     return [
         executor.submit(
@@ -296,12 +336,15 @@ def _submit_group(
             rate,
             pass_num,
             voices.get(segment.speaker),
+            abort_event,
         )
         for segment in group
     ]
 
 
-def _resolve(batches: Iterable[list[Future[_Clip]]]) -> list[list[_Clip]]:
+def _resolve(
+    batches: Iterable[list[Future[_Clip]]], abort_event: threading.Event
+) -> list[list[_Clip]]:
     """Wait for every future across every batch in `batches`, failing fast, and return
     their clips per batch.
 
@@ -312,20 +355,40 @@ def _resolve(batches: Iterable[list[Future[_Clip]]]) -> list[list[_Clip]]:
     B passes every drifted group's batch at once). Waits with `FIRST_EXCEPTION`; on a
     failure -- including a future in `done` that came back cancelled rather than failed,
     which is treated as an abort just the same, even though nothing upstream cancels a
-    future before `_resolve()` sees it today -- the still-queued tail is cancelled first,
-    then every future is classified in one pass. The four counts (succeeded / failed /
-    cancelled / in-flight) are mutually exclusive and sum to the batch size, and nothing
-    that has already completed by the time of that pass can be reported as in-flight --
-    but "in-flight" is not a final state: those tasks are still running and may finish
-    before the WARNING below is even emitted. Logs that WARNING accounting for each
-    category of the batch and re-raises the original exception instance from the
-    lowest-submission-index failure among the failures observed during this
-    classification pass -- deterministic given that set, but not a total order over every
-    failure that could occur, since which failures are visible depends on what else
-    completed after `wait()` returned. If the abort was triggered only by a cancellation,
-    with no task having actually raised, raises `RuntimeError` instead (there is no
-    original exception to re-raise). Already-running tasks are left to finish by the
-    caller's pool shutdown, so no worker outlives the exception.
+    future before `_resolve()` sees it today -- `abort_event` is set FIRST, before the
+    still-queued tail is cancelled: setting it stops every not-yet-issued TTS call and
+    cuts short every queued retry sleep across the whole pool (see `_tts_with_retry`/
+    `_synthesise_and_measure`), which the cancel alone cannot do for tasks that have
+    already started. Every future is then classified in one pass. The five counts
+    (succeeded / failed / aborted / cancelled / in-flight) are mutually exclusive and sum
+    to the batch size, and nothing that has already completed by the time of that pass
+    can be reported as in-flight -- but "in-flight" is not a final state: those tasks are
+    still running (they may still be past their own abort check, e.g. mid vendor call)
+    and may finish before the WARNING below is even emitted. A future whose exception is
+    `_Aborted` (the worker's own cooperative early bail) is counted separately as
+    `aborted` and deliberately excluded from the `failures` dict, so it can never become
+    the exception re-raised below -- only a genuine failure can. Logs that WARNING
+    accounting for each category of the batch and re-raises the original exception
+    instance from the lowest-submission-index failure among the *real* failures observed
+    during this classification pass -- deterministic given that set, but not a total
+    order over every failure that could occur, since which failures are visible depends
+    on what else completed after `wait()` returned. If the abort was triggered only by a
+    cancellation and/or early bails, with no task having actually raised a real failure,
+    raises `RuntimeError` instead (there is no original exception to re-raise). Already-
+    running tasks are left to finish by the caller's pool shutdown, so no worker outlives
+    the exception.
+
+    `abort_event` is created once per `synthesise_track()` call (see there) and passed in
+    by the caller rather than created here, so it is shared across every task submitted
+    to that call's executor -- including tasks from a *different* batch than the one
+    whose failure set it, which is the point (a correction pass's batch must abort a
+    still-running initial-pass task too, if somehow concurrent). It is never reset by
+    `_resolve()` itself: once set, `synthesise_track()`'s pool is doomed for the rest of
+    that call, the failure propagates out of `synthesise_track()` entirely (fail-fast, no
+    partial results returned to the caller), and the caller creates a fresh event on its
+    next, separate call. `_resolve()` is called once per pass within one
+    `synthesise_track()` call; simplest-correct is therefore fine here -- there is no
+    "next pass within the same call" to poison, since a set event always ends the call.
     """
     grouped = list(batches)
     futures = [future for batch in grouped for future in batch]
@@ -339,21 +402,28 @@ def _resolve(batches: Iterable[list[Future[_Clip]]]) -> list[list[_Clip]]:
     # raise an unguarded `CancelledError`, which is a `BaseException` outside `main()`'s
     # caught tuple and would surface as a bare traceback instead of a one-line message.
     if any(future.cancelled() or future.exception() is not None for future in done):
-        # Cancel the still-queued tail first; a future that already started or finished
-        # by the time we get to it below returns False here and is classified from its
-        # own (now final) state instead, so it can never land in the in-flight bucket.
+        # Set the abort flag first, before cancelling the queued tail: this is what stops
+        # calls that have not yet issued their vendor request, not merely ones that have
+        # not yet started (see module docstring above).
+        abort_event.set()
+
+        # Cancel the still-queued tail; a future that already started or finished by the
+        # time we get to it below returns False here and is classified from its own (now
+        # final) state instead, so it can never land in the in-flight bucket.
         for future in futures:
             if future not in done:
                 future.cancel()
 
-        succeeded = failed = cancelled = in_flight = 0
+        succeeded = failed = aborted = cancelled = in_flight = 0
         failures: dict[int, BaseException] = {}
         for index, future in enumerate(futures):
             if future.cancelled():
                 cancelled += 1
             elif future.done():
                 exc = future.exception()
-                if exc is not None:
+                if isinstance(exc, _Aborted):
+                    aborted += 1
+                elif exc is not None:
                     failed += 1
                     failures[index] = exc
                 else:
@@ -363,13 +433,15 @@ def _resolve(batches: Iterable[list[Future[_Clip]]]) -> list[list[_Clip]]:
 
         logger.warning(
             f"Dub synthesis task failed: {succeeded} succeeded, {failed} failed, "
-            f"{cancelled} cancelled before starting, {in_flight} still in flight and "
-            f"will finish before the abort completes, out of {len(futures)} segment(s)."
+            f"{aborted} aborted before calling the vendor, {cancelled} cancelled before "
+            f"starting, {in_flight} still in flight and will finish before the abort "
+            f"completes, out of {len(futures)} segment(s)."
         )
         if failures:
             raise failures[min(failures)]
         raise RuntimeError(
-            "Dub synthesis batch aborted: a task was cancelled with no other task having raised."
+            "Dub synthesis batch aborted: a task was cancelled or bailed out early with "
+            "no other task having raised a real failure."
         )
 
     return [[future.result() for future in batch] for batch in grouped]
@@ -535,13 +607,23 @@ def synthesise_track(
         if (translated := [s for s in raw_group if translations.get(s.id)])
     ]
 
+    # Per-call abort flag, not module-global: created fresh alongside the executor so it
+    # cannot leak into a different `synthesise_track()` call. `_resolve()` sets it on the
+    # first failure it sees, before cancelling the queued tail; see `_resolve()`'s
+    # docstring for why a set event never needs resetting within one call.
+    abort_event = threading.Event()
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Initial pass: one flat batch over every segment of every group at 1.0x.
         initial_futures = [
-            _submit_group(executor, group, translations, tts, aligner, work_dir, 1.0, 0, voices)
+            _submit_group(
+                executor, group, translations, tts, aligner, work_dir, 1.0, 0, abort_event, voices
+            )
             for group in groups
         ]
-        clips_by_group: dict[int, list[_Clip]] = dict(enumerate(_resolve(initial_futures)))
+        clips_by_group: dict[int, list[_Clip]] = dict(
+            enumerate(_resolve(initial_futures, abort_event))
+        )
 
         # Layout pass (pure arithmetic): compute placements/drift and decide which groups
         # need a corrective re-synthesis, keyed by group index. `pending` is the single
@@ -624,11 +706,14 @@ def synthesise_track(
                     work_dir,
                     rate,
                     pass_num,
+                    abort_event,
                     voices,
                 )
                 for idx, rate in rates.items()
             }
-            pass_clips = dict(zip(pass_futures, _resolve(pass_futures.values()), strict=True))
+            pass_clips = dict(
+                zip(pass_futures, _resolve(pass_futures.values(), abort_event), strict=True)
+            )
 
             still_pending: dict[int, tuple[float, float]] = {}
             for idx, new_clips in pass_clips.items():
