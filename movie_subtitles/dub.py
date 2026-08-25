@@ -115,6 +115,7 @@ def _tts_with_retry(
     clip_path: Path,
     rate: float,
     voice: str | None,
+    *,
     abort_event: threading.Event,
 ) -> None:
     """Call `tts` with a provider-agnostic bounded retry.
@@ -213,6 +214,7 @@ def _synthesise_and_measure(
     rate: float,
     pass_num: int,
     voice: str | None,
+    *,
     abort_event: threading.Event,
 ) -> _Clip:
     """Synthesise one segment at `rate` for correction pass `pass_num` and measure its
@@ -231,14 +233,13 @@ def _synthesise_and_measure(
     it does not affect the on-disk path, since a segment's speaker (and therefore its
     voice) does not change across correction passes.
 
-    `abort_event` is checked before the TTS call is issued (in addition to the checks
-    inside `_tts_with_retry`'s own retry loop) -- raising `_Aborted` bails out before any
-    vendor call for a task that had not yet started when the batch was doomed.
+    `abort_event` is passed straight through to `_tts_with_retry`, which is the load-
+    bearing abort check for this task (attempt 1's check, before any vendor call is
+    issued) -- there is nothing between this function's own entry and that call that
+    could block or reach a vendor, so no separate check is duplicated here.
     """
-    if abort_event.is_set():
-        raise _Aborted()
     clip_path = work_dir / f"segment_{segment.id:05d}_p{pass_num:02d}.mp3"
-    _tts_with_retry(tts, text, clip_path, rate, voice, abort_event)
+    _tts_with_retry(tts, text, clip_path, rate, voice, abort_event=abort_event)
     speech_start, speech_end = aligner(clip_path, text)
     # Field names/order here are parsed by scripts/measure.py; changing them
     # silently breaks it (no import edge, no CI signal).
@@ -308,6 +309,7 @@ def _submit_group(
     work_dir: Path,
     rate: float,
     pass_num: int,
+    *,
     abort_event: threading.Event,
     voices: dict[str | None, str | None] = _NO_VOICES,
 ) -> list[Future[_Clip]]:
@@ -336,7 +338,7 @@ def _submit_group(
             rate,
             pass_num,
             voices.get(segment.speaker),
-            abort_event,
+            abort_event=abort_event,
         )
         for segment in group
     ]
@@ -378,17 +380,11 @@ def _resolve(
     running tasks are left to finish by the caller's pool shutdown, so no worker outlives
     the exception.
 
-    `abort_event` is created once per `synthesise_track()` call (see there) and passed in
-    by the caller rather than created here, so it is shared across every task submitted
-    to that call's executor -- including tasks from a *different* batch than the one
-    whose failure set it, which is the point (a correction pass's batch must abort a
-    still-running initial-pass task too, if somehow concurrent). It is never reset by
-    `_resolve()` itself: once set, `synthesise_track()`'s pool is doomed for the rest of
-    that call, the failure propagates out of `synthesise_track()` entirely (fail-fast, no
-    partial results returned to the caller), and the caller creates a fresh event on its
-    next, separate call. `_resolve()` is called once per pass within one
-    `synthesise_track()` call; simplest-correct is therefore fine here -- there is no
-    "next pass within the same call" to poison, since a set event always ends the call.
+    `abort_event`'s per-call ownership/lifetime is documented at its creation site in
+    `synthesise_track()`; here it is enough to note that `_resolve()` never resets it, so
+    once set, every remaining pass within that same `synthesise_track()` call is doomed --
+    which is fine, since a set event always ends the call before there could be a "next
+    pass within the same call" to poison.
     """
     grouped = list(batches)
     futures = [future for batch in grouped for future in batch]
@@ -414,7 +410,7 @@ def _resolve(
             if future not in done:
                 future.cancel()
 
-        succeeded = failed = aborted = cancelled = in_flight = 0
+        succeeded = aborted = cancelled = in_flight = 0
         failures: dict[int, BaseException] = {}
         for index, future in enumerate(futures):
             if future.cancelled():
@@ -424,7 +420,6 @@ def _resolve(
                 if isinstance(exc, _Aborted):
                     aborted += 1
                 elif exc is not None:
-                    failed += 1
                     failures[index] = exc
                 else:
                     succeeded += 1
@@ -432,7 +427,7 @@ def _resolve(
                 in_flight += 1
 
         logger.warning(
-            f"Dub synthesis task failed: {succeeded} succeeded, {failed} failed, "
+            f"Dub synthesis task failed: {succeeded} succeeded, {len(failures)} failed, "
             f"{aborted} aborted before calling the vendor, {cancelled} cancelled before "
             f"starting, {in_flight} still in flight and will finish before the abort "
             f"completes, out of {len(futures)} segment(s)."
@@ -617,7 +612,16 @@ def synthesise_track(
         # Initial pass: one flat batch over every segment of every group at 1.0x.
         initial_futures = [
             _submit_group(
-                executor, group, translations, tts, aligner, work_dir, 1.0, 0, abort_event, voices
+                executor,
+                group,
+                translations,
+                tts,
+                aligner,
+                work_dir,
+                1.0,
+                0,
+                abort_event=abort_event,
+                voices=voices,
             )
             for group in groups
         ]
@@ -706,8 +710,8 @@ def synthesise_track(
                     work_dir,
                     rate,
                     pass_num,
-                    abort_event,
-                    voices,
+                    abort_event=abort_event,
+                    voices=voices,
                 )
                 for idx, rate in rates.items()
             }

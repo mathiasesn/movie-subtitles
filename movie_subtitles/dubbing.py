@@ -5,6 +5,7 @@ from pathlib import Path
 from elevenlabs.core.api_error import ApiError
 
 from movie_subtitles.providers.elevenlabs import build_client
+from movie_subtitles.providers.errors import vendor_errors
 
 logger = logging.getLogger("dubbing")
 
@@ -51,15 +52,15 @@ class ManagedDub:
 
     def _create(self, fpath: Path, source_lang: str, target_lang: str) -> str:
         logger.info(f"Submitting {fpath} to ElevenLabs Dubbing ({source_lang} -> {target_lang})")
-        try:
-            with open(fpath, "rb") as media_file:
-                response = self.client.dubbing.create(
-                    file=media_file,
-                    source_lang=source_lang,
-                    target_lang=target_lang,
-                )
-        except ApiError as exc:
-            raise RuntimeError(f"ElevenLabs Dubbing create request failed: {exc}") from exc
+        with (
+            vendor_errors(ApiError, "ElevenLabs Dubbing create request"),
+            open(fpath, "rb") as media_file,
+        ):
+            response = self.client.dubbing.create(
+                file=media_file,
+                source_lang=source_lang,
+                target_lang=target_lang,
+            )
 
         logger.info(f"Dubbing job {response.dubbing_id} created")
         return response.dubbing_id
@@ -68,10 +69,8 @@ class ManagedDub:
         deadline = time.monotonic() + self.timeout
 
         while True:
-            try:
+            with vendor_errors(ApiError, "ElevenLabs Dubbing status request"):
                 metadata = self.client.dubbing.get(dubbing_id)
-            except ApiError as exc:
-                raise RuntimeError(f"ElevenLabs Dubbing status request failed: {exc}") from exc
             status = metadata.status
 
             if status == _STATUS_DONE:
@@ -105,13 +104,11 @@ class ManagedDub:
         out_path = fpath.with_name(f"{fpath.stem}.dubbed.mp4")
 
         logger.info(f"Downloading dubbed audio for {dubbing_id} ({target_lang}) -> {out_path}")
-        try:
+        with vendor_errors(ApiError, "ElevenLabs Dubbing audio download"):
             chunks = self.client.dubbing.audio.get(dubbing_id, target_lang)
             with open(out_path, "wb") as out_file:
                 for chunk in chunks:
                     out_file.write(chunk)
-        except ApiError as exc:
-            raise RuntimeError(f"ElevenLabs Dubbing audio download failed: {exc}") from exc
 
         logger.info(f"Saved managed dub to {out_path}")
         return out_path
