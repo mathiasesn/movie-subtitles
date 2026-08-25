@@ -3,13 +3,14 @@ import os
 import shutil
 import subprocess
 import tempfile
-from argparse import ArgumentParser, ArgumentTypeError
+from argparse import ArgumentParser, ArgumentTypeError, BooleanOptionalAction
 from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
 from tqdm.auto import tqdm
 
 from movie_subtitles import configure_logging
+from movie_subtitles.config import load_config
 from movie_subtitles.diarize import label_segments
 from movie_subtitles.ffmpeg import extract_mono_wav
 from movie_subtitles.providers.base import (
@@ -653,6 +654,19 @@ def main() -> None:
         help="The input file to transcribe",
     )
     parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help=(
+            "Path to a YAML config file supplying defaults for other flags (keys "
+            "mirror this CLI's own flag names). Defaults to "
+            "$XDG_CONFIG_HOME/movie-subtitles/config.yaml (or ~/.config/movie-subtitles/"
+            "config.yaml), loaded only if it exists; an explicit --config path must "
+            "exist. Precedence: explicit flag > config file > built-in default. "
+            "--config itself cannot be set from the config file"
+        ),
+    )
+    parser.add_argument(
         "--audio-lang",
         type=str,
         default="en",
@@ -711,7 +725,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--dub",
-        action="store_true",
+        action=BooleanOptionalAction,
+        default=False,
         help=(
             "Synthesise the translated segments with TTS and mux them over the source "
             "video (requires ffmpeg and the API key for the resolved TTS engine)"
@@ -755,7 +770,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--keep-cloned-voices",
-        action="store_true",
+        action=BooleanOptionalAction,
+        default=False,
         help=(
             "Do not delete ElevenLabs voices cloned for --voice-match clone/auto after "
             "the run finishes; the retained voice ids are logged"
@@ -811,7 +827,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--separate-background",
-        action="store_true",
+        action=BooleanOptionalAction,
+        default=False,
         help=(
             "Split the source audio into vocals/accompaniment stems (via Demucs) and mux "
             "the dub over the accompaniment stem only, removing the original dialogue "
@@ -823,16 +840,24 @@ def main() -> None:
     )
     parser.add_argument(
         "--managed",
-        action="store_true",
+        action=BooleanOptionalAction,
+        default=False,
         help=(
             "Use the managed ElevenLabs Dubbing job (create/poll/download) instead of "
             "the local transcribe/translate/dub pipeline (requires ELEVENLABS_API_KEY). "
             "Mutually exclusive with --dub."
         ),
     )
-    args = parser.parse_args()
-
     try:
+        # Pre-pass: read --config (only) before set_defaults() runs, so a config file's
+        # values become the parser's defaults rather than being applied after the fact --
+        # this is what makes "explicit flag > config file > built-in default" fall out of
+        # argparse itself. --config is never itself settable from the config file.
+        pre_args, _ = parser.parse_known_args()
+        resolved = load_config(pre_args.config)
+        parser.set_defaults(**resolved)
+        args = parser.parse_args()
+
         create_subtitles(
             args.input,
             args.audio_lang,
