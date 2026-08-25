@@ -2,7 +2,7 @@
 
 Owns everything that maps a diarized `Segment.speaker` label to a TTS voice id, for
 both the `elevenlabs` (instant voice cloning + curated presets) and `openai` (preset
-only) TTS engines. See `specs/speaker-matched-dub-voices.md` for the design.
+only) TTS engines.
 """
 
 import heapq
@@ -333,8 +333,7 @@ def classify_voice(sample_path: str | Path) -> tuple[str, str] | None:
         )
         return None
 
-    # Coarse, heuristic thresholds, NOT tuned against a labelled dataset -- see
-    # specs/speaker-matched-dub-voices.md's "Risks" section.
+    # Coarse, heuristic thresholds, NOT tuned against a labelled dataset.
     #
     # F0 is the primary gender cue. Formants only disambiguate the band where F0
     # alone is unreliable (roughly a low female or a high male voice): a longer

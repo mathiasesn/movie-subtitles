@@ -203,6 +203,13 @@ def _synthesise_and_measure(
     clip_path = work_dir / f"segment_{segment.id:05d}_p{pass_num:02d}.mp3"
     _tts_with_retry(tts, text, clip_path, rate, voice)
     speech_start, speech_end = aligner(clip_path, text)
+    # Field names/order here are parsed by scripts/measure.py; changing them
+    # silently breaks it (no import edge, no CI signal).
+    logger.debug(
+        f"[measure] measure=synth id={segment.id} pass={pass_num} rate={rate:.3f} "
+        f"tgt_chars={len(text)} speech_len={speech_end - speech_start:.3f} "
+        f"src_speech={_speech_duration(segment):.3f}"
+    )
     return _Clip(clip_path, speech_start, speech_end)
 
 
@@ -211,8 +218,8 @@ def _inter_segment_gap(prev: Segment, nxt: Segment) -> float:
 
     Computed as `next`'s speech start minus `prev`'s speech end, both via
     `_speech_bounds` -- word-level timings when available (so a backend emitting
-    exactly-contiguous cue boundaries, e.g. ElevenLabs Scribe, see
-    `specs/fix-dub-out-of-sync-contiguous-cues.md`, still yields real gaps), else the
+    exactly-contiguous cue boundaries, e.g. ElevenLabs Scribe, still yields real
+    gaps), else the
     cue-boundary fallback (`local`/`openai` ASR, where `words is None`), degrading cleanly
     rather than requiring word timings everywhere.
     """

@@ -37,8 +37,8 @@ class OpenAITranscribe:
     drive it. The model remains an __init__ param the caller can override for
     other use cases.
 
-    Confirmed limitation (diagnostic, 2026-08-19, on a music-heavy trailer -- see
-    specs/fix-smoke-run-findings.md): "whisper-1"'s segment timestamps degrade to
+    Confirmed limitation (diagnostic, 2026-08-19, on a music-heavy trailer):
+    "whisper-1"'s segment timestamps degrade to
     uniform 1.000s spans on music-heavy or dialogue-sparse audio. This is vendor
     behaviour, not a mapping bug -- the same distortion was present in the raw API
     response before it ever reached _yield_segments(), which was checked and needs

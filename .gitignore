@@ -1,4 +1,4 @@
-data
+data/*
 samples/
 
 # Claude Code local state (worktrees, settings)

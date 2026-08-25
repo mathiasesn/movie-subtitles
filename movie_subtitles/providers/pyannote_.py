@@ -1,6 +1,6 @@
 """pyannote.audio-backed speaker diarisation: whole-file turns for non-diarizing ASR.
 
-Feeds #27 (`specs/diarisation-for-local-and-openai-asr.md`): `--asr-engine local` and
+Feeds #27: `--asr-engine local` and
 `--asr-engine openai` return no speaker information at all, so `Segment.speaker` stays
 `None` for every cue and `--voice-match` degrades to a single narrator voice. This module
 runs `pyannote/speaker-diarization-community-1` over the source audio once, up front, and

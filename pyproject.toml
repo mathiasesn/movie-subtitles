@@ -54,6 +54,25 @@ movie-subtitles = "movie_subtitles.cli:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# Both build targets are stated explicitly rather than left to hatchling's
+# auto-detection. The wheel is the package and nothing else: scripts/ is a
+# developer tool (it parses the [measure] logs behind cli.py's budget
+# constants) and must never land in a `uv tool install movie-subtitles`.
+[tool.hatch.build.targets.wheel]
+packages = ["movie_subtitles"]
+
+# The sdist needs an explicit exclude list because hatchling does not honour
+# the nested specs/.gitignore -- without this, local design notes and
+# measurement data that are deliberately untracked get published to PyPI.
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/scripts",
+    "/specs",
+    "/data",
+    "/.github",
+    "/.claude",
+]
+
 [tool.ruff]
 line-length = 100
 
