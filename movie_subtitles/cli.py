@@ -663,7 +663,9 @@ def main() -> None:
             "$XDG_CONFIG_HOME/movie-subtitles/config.yaml (or ~/.config/movie-subtitles/"
             "config.yaml), loaded only if it exists; an explicit --config path must "
             "exist. Precedence: explicit flag > config file > built-in default. "
-            "--config itself cannot be set from the config file"
+            "--config itself cannot be set from the config file. Note: --help always "
+            "shows the built-in defaults, never values from a config file, since "
+            "--config is only read after argument parsing begins"
         ),
     )
     parser.add_argument(

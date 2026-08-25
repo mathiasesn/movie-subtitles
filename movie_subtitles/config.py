@@ -28,13 +28,24 @@ from movie_subtitles.voices import VOICE_MATCH_MODES
 
 logger = logging.getLogger("config")
 
-# Single per-user config file, honouring XDG_CONFIG_HOME like other XDG-aware CLIs.
-# There is deliberately no per-project/cwd config file (see the spec).
-DEFAULT_CONFIG_PATH = (
-    Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
-    / "movie-subtitles"
-    / "config.yaml"
-)
+
+def default_config_path() -> Path:
+    """The single per-user config file path, honouring XDG_CONFIG_HOME.
+
+    Computed on each call rather than once at import time: cli.py imports this module
+    before main() calls _load_env(), so an XDG_CONFIG_HOME (or HOME) set only in .env
+    would be silently ignored by a module-level constant -- the same ordering trap
+    cli.py already works around by re-calling configure_logging() after _load_env().
+
+    There is deliberately no per-project/cwd config file: this is a per-user tool-
+    preferences file, and a per-checkout one would make a run's behaviour depend on cwd.
+    """
+    return (
+        Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+        / "movie-subtitles"
+        / "config.yaml"
+    )
+
 
 # Secret-like key names rejected with a tailored message pointing at .env, checked before
 # the generic unknown-key error so the message teaches rather than just refusing. Compared
@@ -85,7 +96,9 @@ _SCHEMA: dict[str, tuple[str, tuple[str, ...] | None, bool]] = {
 }
 
 
-def _validate_value(file: Path, key: str, value: Any, kind: str, choices, nullable: bool) -> Any:
+def _validate_value(
+    file: Path, key: str, value: Any, kind: str, choices: tuple[str, ...] | None, nullable: bool
+) -> Any:
     if value is None:
         if nullable:
             return None
@@ -137,24 +150,25 @@ def _resolve_path(path: str | None) -> Path | None:
     """The file to load, or None if there is none to load.
 
     `path` given (from --config) must exist -- checked by the caller, which raises
-    naming it explicitly. `path` None falls back to DEFAULT_CONFIG_PATH, where a missing
-    file is not an error (mirrors _load_env()'s posture toward a missing .env).
+    naming it explicitly. `path` None falls back to default_config_path(), where a
+    missing file is not an error (mirrors _load_env()'s posture toward a missing .env).
     """
     if path is not None:
         return Path(path)
-    return DEFAULT_CONFIG_PATH if DEFAULT_CONFIG_PATH.exists() else None
+    default_path = default_config_path()
+    return default_path if default_path.exists() else None
 
 
 def load_config(path: str | None = None) -> dict[str, object]:
     """Load and strictly validate the YAML config file, returning a dict of overrides.
 
     `path` is the value of an explicit `--config <path>` flag; it must exist, else this
-    raises ValueError naming it. With `path=None`, DEFAULT_CONFIG_PATH is used instead,
+    raises ValueError naming it. With `path=None`, default_config_path() is used instead,
     and a missing default file returns {} rather than raising -- a config file is
     optional, same posture as .env.
 
-    Validation order per key (checked in this order so the message teaches, per the
-    spec): (1) a known secret-key name (case-insensitively) -> tailored ValueError
+    Validation order per key (checked in this order so the message teaches): (1) a
+    known secret-key name (case-insensitively) -> tailored ValueError
     pointing at .env, (2) an unrecognised key -> ValueError listing the recognised ones,
     (3) wrong type / out-of-choices value -> ValueError naming file, key and the
     expected values. The returned dict is meant to be applied via
