@@ -1,0 +1,38 @@
+# Example movie-subtitles config file.
+#
+# Copy this to the per-user config location -- $XDG_CONFIG_HOME/movie-subtitles/config.yaml,
+# or ~/.config/movie-subtitles/config.yaml when XDG_CONFIG_HOME is unset -- or point
+# --config at a copy of it elsewhere. Every key below is commented out and set to the
+# built-in argparse default, so copying this file as-is is a no-op; uncomment and edit
+# only the keys you want to override.
+#
+# Precedence, highest first: an explicit CLI flag > this config file > the built-in
+# default shown below.
+#
+# Do NOT put API keys here. ELEVENLABS_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY /
+# HF_TOKEN belong in .env (see .env.example) -- a key that looks like one of those
+# names is rejected here with an error pointing back at .env.
+
+# audio_lang: "en"
+# srt_lang: "da"
+# whisper_model: "large-v3"
+# mt_model: "jbochi/madlad400-3b-mt"
+
+# engine: "local"                # local | elevenlabs | openai
+# asr_engine: null                # local | elevenlabs | openai (null = derive from --engine)
+# translation_engine: null        # local | anthropic | openai (null = derive from --engine)
+# tts_engine: null                # elevenlabs | openai (null = derive from --engine)
+
+# dub: false
+# dub_workers: 1
+# dub_correction_passes: 3
+
+# voice_match: "auto"             # off | clone | preset | auto
+# keep_cloned_voices: false
+# clone_min_seconds: 30.0
+# clone_target_seconds: 60.0
+# voice_preset_table: null        # path to a JSON preset-table file, or null
+
+# duck_level: null                # 0.0..1.0, or null to let mux_dub resolve it itself
+# separate_background: false
+# managed: false

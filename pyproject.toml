@@ -41,6 +41,9 @@ dependencies = [
     # (2.2.2 for x86_64 macOS, 2.13.0 elsewhere) down to torch 2.13.0 only, which has
     # no x86_64 macOS wheel -- Intel Mac support is deliberately dropped as a result.
     "pyannote.audio>=4.0",
+    # config.py's per-user config-file layer: parsed with yaml.safe_load only, never
+    # yaml.load, since the file is untrusted input from disk.
+    "pyyaml",
 ]
 
 [project.urls]

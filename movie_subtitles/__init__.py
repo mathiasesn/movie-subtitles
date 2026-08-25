@@ -8,6 +8,7 @@ import sys
 # Add a new module's logger name when you add the module.
 _PACKAGE_LOGGERS = (
     "cli",
+    "config",
     "dub",
     "dubbing",
     "elevenlabs",
